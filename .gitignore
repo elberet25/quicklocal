@@ -6,6 +6,7 @@ scripts/
 credentials.json
 token.pickle
 token.json
+calendar_token.json
 *.pyc
 __pycache__/
 .DS_Store
