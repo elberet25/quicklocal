@@ -2,24 +2,24 @@
 Simple AI Agent with Tool Use — using the Anthropic Claude API.
 
 HOW IT WORKS (high level):
-  1. We define a tool (get_current_time) that Claude can "call".
+  1. We define tools that Claude can "call".
   2. The agent loop sends the user's message to Claude.
-  3. If Claude decides it needs the time, it returns a tool_use block
+  3. If Claude decides it needs a tool, it returns a tool_use block
      instead of a final answer.  We execute the real Python function,
      send the result back, and Claude produces the final answer.
   4. We repeat until the user types "quit".
 """
 
-import datetime
 import logging
 import os
+import sys
+from pathlib import Path
 
 import anthropic
 from dotenv import load_dotenv
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from gmail_tool import read_latest_emails, search_emails, preview_draft_reply, create_draft_reply
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tools import ALL_TOOLS
 
 load_dotenv()  # loads .env from the current working directory
 
@@ -39,197 +39,31 @@ client = anthropic.Anthropic()
 
 # ---------------------------------------------------------------------------
 # 2. MODEL
-#    claude-opus-4-7 is the current recommended default.
 # ---------------------------------------------------------------------------
 MODEL = "claude-sonnet-4-6"
 
 # ---------------------------------------------------------------------------
-# 3. TOOL DEFINITION
-#    We describe our tool in JSON Schema so Claude knows:
-#      • what the tool is called
-#      • when to use it (description)
-#      • what parameters it accepts (input_schema)
-#
-#    get_current_time needs no parameters — the schema is an empty object.
+# 3. TOOL REGISTRY
+#    Maps tool name → tool instance.  TOOLS is the schema list for the API.
 # ---------------------------------------------------------------------------
-TOOLS = [
-    {
-        "name": "get_current_time",
-        "description": (
-            "Returns the current local date and time. "
-            "Use this whenever the user asks what time or date it is."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {},   # no parameters needed
-            "required": [],
-        },
-    },
-    {
-        "name": "read_latest_emails",
-        "description": (
-            "Fetches the N most recent emails from the user's Gmail inbox. "
-            "Use when the user asks to check, show, or read their latest/recent emails."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "max_results": {
-                    "type": "integer",
-                    "description": "Number of emails to return (default 5, max 20).",
-                    "default": 5,
-                },
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "search_emails",
-        "description": (
-            "Searches Gmail using a search query string. Supports Gmail search operators: "
-            "from:, to:, subject:, is:unread, has:attachment, after:YYYY/MM/DD, etc. "
-            "Use when the user asks to find emails by sender, subject, keyword, or any filter."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Gmail search query, e.g. 'from:boss@example.com', "
-                        "'subject:invoice is:unread', 'from:newsletter after:2024/01/01'."
-                    ),
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return (default 10).",
-                    "default": 10,
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "preview_draft_reply",
-        "description": (
-            "Formats a draft reply and returns it for the user to review. "
-            "ALWAYS call this first and show the result to the user before calling create_draft_reply. "
-            "Never skip this step — the user must confirm before any draft is saved."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "to": {"type": "string", "description": "Recipient email address."},
-                "subject": {"type": "string", "description": "Email subject line."},
-                "body": {"type": "string", "description": "Full email body text."},
-                "reply_to_id": {
-                    "type": "string",
-                    "description": "Gmail message ID of the email being replied to (for threading). Leave empty for a new thread.",
-                },
-            },
-            "required": ["to", "subject", "body"],
-        },
-    },
-    {
-        "name": "create_draft_reply",
-        "description": (
-            "Saves a draft reply in Gmail. "
-            "Only call this after preview_draft_reply has been shown to the user "
-            "and they have explicitly confirmed (e.g. 'yes', 'looks good', 'save it')."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "to": {"type": "string", "description": "Recipient email address."},
-                "subject": {"type": "string", "description": "Email subject line."},
-                "body": {"type": "string", "description": "Full email body text."},
-                "reply_to_id": {
-                    "type": "string",
-                    "description": "Gmail message ID of the email being replied to (for threading). Leave empty for a new thread.",
-                },
-            },
-            "required": ["to", "subject", "body"],
-        },
-    },
-    {
-        "name": "calculate",
-        "description": (
-            "Performs basic arithmetic: add, subtract, multiply, or divide two numbers. "
-            "Use this whenever the user asks to calculate, compute, or do math."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["add", "subtract", "multiply", "divide"],
-                    "description": "The arithmetic operation to perform.",
-                },
-                "a": {
-                    "type": "number",
-                    "description": "The first number.",
-                },
-                "b": {
-                    "type": "number",
-                    "description": "The second number.",
-                },
-            },
-            "required": ["operation", "a", "b"],
-        },
-    },
-]
+tool_registry = {tool.name: tool for tool in ALL_TOOLS}
+TOOLS = [tool.get_description() for tool in ALL_TOOLS]
 
 # ---------------------------------------------------------------------------
-# 4. TOOL IMPLEMENTATION
-#    This is the real Python function that runs when Claude calls the tool.
-#    It must return a plain string (or something JSON-serialisable).
+# 4. TOOL DISPATCHER
 # ---------------------------------------------------------------------------
-def get_current_time() -> str:
-    now = datetime.datetime.now()
-    return now.strftime("%A, %B %d %Y — %I:%M:%S %p")
-
-
-def calculate(operation: str, a: float, b: float) -> str:
-    if operation == "add":
-        result = a + b
-    elif operation == "subtract":
-        result = a - b
-    elif operation == "multiply":
-        result = a * b
-    elif operation == "divide":
-        if b == 0:
-            return "Error: division by zero"
-        result = a / b
-    else:
-        return f"Error: unknown operation '{operation}'"
-    return str(result)
-
-
-# ---------------------------------------------------------------------------
-# 5. TOOL DISPATCHER
-#    Maps tool names → Python functions so we can call them generically.
-#    If you add more tools later, register them here.
-# ---------------------------------------------------------------------------
-TOOL_REGISTRY = {
-    "get_current_time": get_current_time,
-    "calculate": calculate,
-    "read_latest_emails": read_latest_emails,
-    "search_emails": search_emails,
-    "preview_draft_reply": preview_draft_reply,
-    "create_draft_reply": create_draft_reply,
-}
-
 def execute_tool(name: str, tool_input: dict) -> str:
     """Look up and run the requested tool; return its string result."""
     logger.debug("Tool called: %s | input: %s", name, tool_input)
-    fn = TOOL_REGISTRY.get(name)
-    if fn is None:
+    tool = tool_registry.get(name)
+    if tool is None:
         return f"Error: unknown tool '{name}'"
-    return fn(**tool_input)          # pass Claude's parsed arguments to the function
+    result = tool.execute(**tool_input)
+    return result.get("result", result.get("error", str(result)))
 
 
 # ---------------------------------------------------------------------------
-# 6. AGENT LOOP (one turn)
+# 5. AGENT LOOP (one turn)
 #    Sends messages to Claude and handles the tool-use round trip.
 #
 #    Why a loop here?
@@ -263,11 +97,11 @@ def run_agent_turn(conversation: list[dict]) -> str:
 
         # ---- Case B: Claude wants to call one or more tools ----
         if response.stop_reason == "tool_use":
-            # 6a. Append Claude's response (including tool_use blocks) to the
-            #     conversation so the history stays consistent.
+            # Append Claude's response (including tool_use blocks) to the
+            # conversation so the history stays consistent.
             conversation.append({"role": "assistant", "content": response.content})
 
-            # 6b. Execute every tool Claude requested and collect the results.
+            # Execute every tool Claude requested and collect the results.
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
@@ -282,7 +116,7 @@ def run_agent_turn(conversation: list[dict]) -> str:
                     "content": result_text,
                 })
 
-            # 6c. Send all results back as a single "user" message.
+            # Send all results back as a single "user" message.
             conversation.append({"role": "user", "content": tool_results})
             # Loop: Claude will now produce its final answer (or call more tools).
 
@@ -292,7 +126,7 @@ def run_agent_turn(conversation: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. MAIN — conversation loop
+# 6. MAIN — conversation loop
 #    Maintains the full conversation history across turns so Claude has
 #    context for follow-up questions.
 # ---------------------------------------------------------------------------
