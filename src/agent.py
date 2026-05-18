@@ -189,7 +189,24 @@ def execute_tool(name: str, tool_input: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 7. AGENT LOOP (one turn)
+# 7. CONTENT SERIALIZATION
+# ---------------------------------------------------------------------------
+
+def _serialize_block(block) -> dict:
+    """Convert an Anthropic SDK content block to a plain API-compatible dict.
+
+    model_dump() includes SDK-specific fields (e.g. citations=None) that the
+    API rejects when the message is sent back in subsequent turns.
+    """
+    if block.type == "text":
+        return {"type": "text", "text": block.text}
+    if block.type == "tool_use":
+        return {"type": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+    return block.model_dump(exclude_none=True)
+
+
+# ---------------------------------------------------------------------------
+# 8. AGENT LOOP (one turn)
 # ---------------------------------------------------------------------------
 
 def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage]:
@@ -214,7 +231,7 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
             return "", last_usage
 
         if response.stop_reason == "tool_use":
-            conversation.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
+            conversation.append({"role": "assistant", "content": [_serialize_block(b) for b in response.content]})
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
