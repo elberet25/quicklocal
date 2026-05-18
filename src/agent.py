@@ -16,6 +16,10 @@ import os
 
 import anthropic
 from dotenv import load_dotenv
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from gmail_tool import read_latest_emails, search_emails, preview_draft_reply, create_draft_reply
 
 load_dotenv()  # loads .env from the current working directory
 
@@ -59,6 +63,92 @@ TOOLS = [
             "type": "object",
             "properties": {},   # no parameters needed
             "required": [],
+        },
+    },
+    {
+        "name": "read_latest_emails",
+        "description": (
+            "Fetches the N most recent emails from the user's Gmail inbox. "
+            "Use when the user asks to check, show, or read their latest/recent emails."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_results": {
+                    "type": "integer",
+                    "description": "Number of emails to return (default 5, max 20).",
+                    "default": 5,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "search_emails",
+        "description": (
+            "Searches Gmail using a search query string. Supports Gmail search operators: "
+            "from:, to:, subject:, is:unread, has:attachment, after:YYYY/MM/DD, etc. "
+            "Use when the user asks to find emails by sender, subject, keyword, or any filter."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Gmail search query, e.g. 'from:boss@example.com', "
+                        "'subject:invoice is:unread', 'from:newsletter after:2024/01/01'."
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 10).",
+                    "default": 10,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "preview_draft_reply",
+        "description": (
+            "Formats a draft reply and returns it for the user to review. "
+            "ALWAYS call this first and show the result to the user before calling create_draft_reply. "
+            "Never skip this step — the user must confirm before any draft is saved."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string", "description": "Email subject line."},
+                "body": {"type": "string", "description": "Full email body text."},
+                "reply_to_id": {
+                    "type": "string",
+                    "description": "Gmail message ID of the email being replied to (for threading). Leave empty for a new thread.",
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+    },
+    {
+        "name": "create_draft_reply",
+        "description": (
+            "Saves a draft reply in Gmail. "
+            "Only call this after preview_draft_reply has been shown to the user "
+            "and they have explicitly confirmed (e.g. 'yes', 'looks good', 'save it')."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email address."},
+                "subject": {"type": "string", "description": "Email subject line."},
+                "body": {"type": "string", "description": "Full email body text."},
+                "reply_to_id": {
+                    "type": "string",
+                    "description": "Gmail message ID of the email being replied to (for threading). Leave empty for a new thread.",
+                },
+            },
+            "required": ["to", "subject", "body"],
         },
     },
     {
@@ -123,6 +213,10 @@ def calculate(operation: str, a: float, b: float) -> str:
 TOOL_REGISTRY = {
     "get_current_time": get_current_time,
     "calculate": calculate,
+    "read_latest_emails": read_latest_emails,
+    "search_emails": search_emails,
+    "preview_draft_reply": preview_draft_reply,
+    "create_draft_reply": create_draft_reply,
 }
 
 def execute_tool(name: str, tool_input: dict) -> str:
