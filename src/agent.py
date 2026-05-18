@@ -214,7 +214,7 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
             return "", last_usage
 
         if response.stop_reason == "tool_use":
-            conversation.append({"role": "assistant", "content": response.content})
+            conversation.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
             tool_results = []
             for block in response.content:
                 if block.type != "tool_use":
