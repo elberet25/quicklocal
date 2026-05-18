@@ -6,6 +6,11 @@ from tools.gmail_tool import (
     PreviewDraftReplyTool,
     CreateDraftReplyTool,
 )
+from tools.calendar_tool import (
+    GetScheduleTool,
+    FindFreeTimeTool,
+    CreateEventTool,
+)
 
 ALL_TOOLS = [
     TimeTool(),
@@ -14,6 +19,9 @@ ALL_TOOLS = [
     SearchEmailsTool(),
     PreviewDraftReplyTool(),
     CreateDraftReplyTool(),
+    GetScheduleTool(),
+    FindFreeTimeTool(),
+    CreateEventTool(),
 ]
 
 __all__ = ["ALL_TOOLS"]
