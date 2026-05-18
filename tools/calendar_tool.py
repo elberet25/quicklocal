@@ -285,7 +285,6 @@ class CreateEventTool(CalendarBaseTool):
     def execute(self, **kwargs) -> dict:
         try:
             local_tz = datetime.now(timezone.utc).astimezone().tzinfo
-            tz_name = str(local_tz)
 
             def _to_rfc3339(dt_str: str) -> str:
                 dt = datetime.fromisoformat(dt_str)
@@ -295,8 +294,8 @@ class CreateEventTool(CalendarBaseTool):
 
             event_body = {
                 "summary": kwargs["summary"],
-                "start": {"dateTime": _to_rfc3339(kwargs["start"]), "timeZone": tz_name},
-                "end": {"dateTime": _to_rfc3339(kwargs["end"]), "timeZone": tz_name},
+                "start": {"dateTime": _to_rfc3339(kwargs["start"])},
+                "end": {"dateTime": _to_rfc3339(kwargs["end"])},
             }
             if kwargs.get("description"):
                 event_body["description"] = kwargs["description"]
