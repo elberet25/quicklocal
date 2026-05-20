@@ -266,6 +266,8 @@ These should NOT be changed without explicit discussion:
 
 - **RAG auto-sync runs on every search**: `_sync_directory()` does a full directory scan (stat every file) on every `SearchDocumentsTool` call. On large directories this adds latency. A file-system watcher or TTL cache would be better.
 
+- **Structural chunking mismatch for txt files**: `\n\n`-based splitting works well for prose (markdown, PDFs) but produces poor chunks for structured txt files like meeting notes, which organize content around speaker turns, agenda sections, and explicit separators (`------`). The semantic unit in these files is "everything in a section" not "a paragraph between blank lines." Potential improvement: structure-aware chunking that detects section delimiters and speaker/header patterns and uses those as chunk boundaries instead of blank lines. Deferred — current cleaning pass (strip separators, normalize whitespace) mitigates the worst artifacts, and hierarchical document summaries (Step 3) compensate for poor chunk boundaries at query time.
+
 - **`_serialize_block()` is a workaround for SDK behavior**: It exists because `response.content[i].model_dump()` includes `citations=None` and other fields the API rejects in subsequent turns. This may break if the SDK changes its response format.
 
 ---

@@ -22,7 +22,11 @@ MANIFEST_PATH = Path.home() / ".quicklocal" / "index_manifest.json"
 COLLECTION_NAME = "local_docs"
 EMBED_MODEL = "all-MiniLM-L6-v2"
 MIN_CHUNK_CHARS = 50
+MIN_MERGE_CHARS = 150  # chunks shorter than this are merged into the following chunk
 SUPPORTED = {".pdf", ".txt", ".md"}
+
+# Increment whenever the chunking strategy changes (triggers automatic full reindex)
+CHUNKING_VERSION = 3
 
 
 def _is_allowed(path: Path) -> bool:
@@ -69,6 +73,7 @@ class RAGEngine:
         return {}
 
     def _save_manifest(self, manifest: dict) -> None:
+        manifest["__chunking_version__"] = CHUNKING_VERSION
         try:
             MANIFEST_PATH.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         except OSError as e:
@@ -82,6 +87,16 @@ class RAGEngine:
     # Chunking
     # ------------------------------------------------------------------
 
+    def _clean_text(self, text: str) -> str:
+        import re
+        # Remove horizontal rule lines (3+ dashes, underscores, equals, asterisks)
+        text = re.sub(r"^\s*[-_=*]{3,}\s*$", "", text, flags=re.MULTILINE)
+        # Collapse 3+ consecutive blank lines into one paragraph break
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        # Strip trailing whitespace from each line
+        text = "\n".join(line.rstrip() for line in text.split("\n"))
+        return text.strip()
+
     def _read_file(self, path: Path) -> str:
         suffix = path.suffix.lower()
         if suffix == ".pdf":
@@ -91,19 +106,40 @@ class RAGEngine:
                 # corrupts bullet-point lists in the index. Verified via check_pdf_extraction.py.
                 import fitz
                 doc = fitz.open(str(path))
-                return "\n\n".join(page.get_text() for page in doc)
+                text = "\n\n".join(page.get_text() for page in doc)
+                return self._clean_text(text)
             except Exception as e:
                 logger.warning("Could not read PDF %s: %s", path, e)
                 return ""
         try:
-            return path.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
+            return self._clean_text(text)
         except Exception as e:
             logger.warning("Could not read %s: %s", path, e)
             return ""
 
     def _chunk(self, text: str) -> list[str]:
-        raw = [p.strip() for p in text.split("\n\n")]
-        return [p for p in raw if len(p) >= MIN_CHUNK_CHARS]
+        raw = [p.strip() for p in text.split("\n\n") if len(p.strip()) >= MIN_CHUNK_CHARS]
+
+        # Forward pass: merge short chunks into the following chunk to prevent
+        # isolated bullet items and transitional fragments.
+        merged = []
+        i = 0
+        while i < len(raw):
+            chunk = raw[i]
+            while len(chunk) < MIN_MERGE_CHARS and i + 1 < len(raw):
+                i += 1
+                chunk = chunk + "\n\n" + raw[i]
+            merged.append(chunk)
+            i += 1
+
+        # Backward pass: if the last chunk is a short trailing fragment (e.g. a
+        # single bullet split off by a page break), absorb it into the previous chunk.
+        if len(merged) > 1 and len(merged[-1]) < MIN_MERGE_CHARS * 2:
+            merged[-2] = merged[-2] + "\n\n" + merged[-1]
+            merged.pop()
+
+        return merged
 
     # ------------------------------------------------------------------
     # Core indexing (single file)
@@ -139,8 +175,21 @@ class RAGEngine:
         Compares each file's mtime + size against the manifest. Only files
         that changed since the last index run are re-embedded, so repeated
         searches over an unchanged directory cost just a directory scan.
+
+        If CHUNKING_VERSION has changed since the manifest was written, all
+        files in this directory are force-reindexed with the new strategy.
         """
         manifest = self._load_manifest()
+
+        if manifest.get("__chunking_version__") != CHUNKING_VERSION:
+            logger.debug("Chunking version changed — forcing reindex of %s", directory)
+            for key in list(manifest.keys()):
+                if key.startswith("__"):
+                    continue
+                if Path(key).is_relative_to(directory):
+                    self._collection.delete(where={"source": key})
+            manifest = {"__chunking_version__": CHUNKING_VERSION}
+
         current_files = {
             f: self._file_state(f)
             for f in directory.rglob("*")
@@ -157,6 +206,8 @@ class RAGEngine:
                 changed = True
 
         for key in list(manifest.keys()):
+            if key.startswith("__"):
+                continue
             path = Path(key)
             if path.is_relative_to(directory) and not path.exists():
                 logger.debug("Removing deleted file from index: %s", path.name)
@@ -188,6 +239,8 @@ class RAGEngine:
 
         # Clean up stale manifest entries for files removed from this directory
         for key in list(manifest.keys()):
+            if key.startswith("__"):
+                continue
             path = Path(key)
             if path.is_relative_to(directory) and not path.exists():
                 self._collection.delete(where={"source": key})
