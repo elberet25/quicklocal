@@ -3,12 +3,11 @@ qenv/
 docs/
 .claude/
 .env
-credentials.json
-token.pickle
-token.json
-calendar_token.json
-conversation_history.json
+*.json
+*.pickle
 *.pyc
 __pycache__/
+.pytest_cache/
+data/
 .DS_Store
 scripts/populate_slack.py
