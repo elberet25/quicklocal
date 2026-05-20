@@ -1,6 +1,7 @@
 venv/
 qenv/
 docs/
+.claude/
 .env
 credentials.json
 token.pickle
