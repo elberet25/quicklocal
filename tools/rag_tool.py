@@ -6,6 +6,7 @@ from pathlib import Path
 
 import anthropic
 import chromadb
+import os
 from sentence_transformers import SentenceTransformer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -343,6 +344,7 @@ class RAGEngine:
                 "score": round(1 - dist, 3),  # cosine distance → similarity
                 "doc_summary": doc_summaries.get(source_name, ""),
             })
+
         return hits
 
 
@@ -463,6 +465,17 @@ class SearchDocumentsTool(BaseTool):
 
             chunk_parts = [f"[{h['source']}] (score: {h['score']})\n{h['text']}" for h in hits]
             parts.append("=== Relevant Chunks ===\n\n" + "\n\n---\n\n".join(chunk_parts))
+
+            if os.environ.get("RAG_DEBUG", "").lower() == "true":
+                print(f"\n[RAG_DEBUG] Retrieved {len(hits)} chunk(s):")
+                for h in hits:
+                    print(f"  [{h['source']}] score={h['score']} ({len(h['text'])} chars)")
+                unique_summaries = {h["source"]: h["doc_summary"] for h in hits if h["doc_summary"]}
+                print(f"\n[RAG_DEBUG] Document summaries ({len(unique_summaries)}):")
+                for src, summary in unique_summaries.items():
+                    print(f"  [{src}] {summary[:120]}…")
+                total_chars = sum(len(h["text"]) for h in hits) + sum(len(s) for s in unique_summaries.values())
+                print(f"\n[RAG_DEBUG] Estimated retrieval context: ~{total_chars // 4} tokens ({total_chars} chars)\n")
 
             return {"result": "\n\n".join(parts)}
         except Exception as e:

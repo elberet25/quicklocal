@@ -106,6 +106,18 @@ class TestSearchDocumentsTool:
         assert "index" in result["result"].lower()
 
 
+    def test_rag_debug_prints_retrieval_info(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("QUICKLOCAL_DATA_DIRS", str(tmp_path))
+        monkeypatch.setenv("RAG_DEBUG", "true")
+        with patch("tools.rag_tool.RAGEngine.get", return_value=_mock_engine()):
+            self.tool.execute(query="meeting notes")
+        captured = capsys.readouterr()
+        assert "[RAG_DEBUG]" in captured.out
+        assert "file_a.txt" in captured.out
+        assert "Document summaries" in captured.out
+        assert "tokens" in captured.out
+
+
 # ---------------------------------------------------------------------------
 # IndexDocumentsTool
 # ---------------------------------------------------------------------------

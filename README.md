@@ -19,7 +19,7 @@ The goal is to keep adding tools until the assistant covers the main places wher
 |---|---|
 | Gmail integration (read, search, draft) | Done |
 | Google Calendar (read, create events) | Done |
-| RAG over local files (ChromaDB + sentence-transformers) | Done |
+| RAG over local files (hierarchical: chunk + doc summaries) | Done |
 | Persistent conversation memory with rolling summarization | Done |
 | Multi-tool orchestration via Claude tool use | Done |
 | Slack integration | Planned |
@@ -50,8 +50,10 @@ quicklocal/
 │   ├── time_tool.py      # Current time/date
 │   └── calculator_tool.py
 ├── scripts/
-│   ├── index_docs.py     # Index local documents into ChromaDB
-│   └── search_docs.py    # Debug: search the vector store directly
+│   ├── index_docs.py          # Index local documents into ChromaDB
+│   ├── search_docs.py         # CLI: search the vector store directly
+│   ├── check_chunking.py      # Diagnostic: inspect chunks for sampled files
+│   └── check_summaries.py     # Diagnostic: inspect stored document summaries
 ├── tests/
 ├── config.py             # Data directory config (reads from .env)
 ├── requirements.txt
@@ -91,6 +93,23 @@ For Google APIs, create a project in Google Cloud Console, enable Gmail and Cale
 
 ```bash
 python scripts/index_docs.py
+```
+
+Supports `.pdf`, `.txt`, and `.md` files. On first index (or after a chunking strategy change), the agent also generates a 3–5 sentence Claude summary per document stored alongside the chunks. Subsequent searches auto-sync only changed files.
+
+To inspect retrieval at runtime:
+
+```bash
+RAG_DEBUG=true python src/agent.py
+```
+
+This prints the retrieved chunks (source, score, size), document summaries included, and an estimated token count for the retrieval context.
+
+Diagnostic scripts:
+
+```bash
+python scripts/check_chunking.py    # show chunks for 1 sampled file per type
+python scripts/check_summaries.py   # show up to 5 stored doc summaries from ChromaDB
 ```
 
 ### Run
