@@ -86,9 +86,12 @@ class RAGEngine:
         suffix = path.suffix.lower()
         if suffix == ".pdf":
             try:
-                from pypdf import PdfReader
-                reader = PdfReader(str(path))
-                return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+                # PyMuPDF (fitz) correctly maps custom font glyphs (e.g. bullet symbols)
+                # to proper Unicode characters. pypdf renders them as \x7f (DEL), which
+                # corrupts bullet-point lists in the index. Verified via check_pdf_extraction.py.
+                import fitz
+                doc = fitz.open(str(path))
+                return "\n\n".join(page.get_text() for page in doc)
             except Exception as e:
                 logger.warning("Could not read PDF %s: %s", path, e)
                 return ""

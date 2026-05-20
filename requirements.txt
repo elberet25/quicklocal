@@ -1,6 +1,7 @@
 annotated-types==0.7.0
 chromadb>=1.0.0
 sentence-transformers>=3.0.0
+pymupdf>=1.27.0
 pypdf>=4.0.0
 google-auth>=2.0.0
 google-auth-oauthlib>=1.0.0
