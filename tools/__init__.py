@@ -11,6 +11,7 @@ from tools.calendar_tool import (
     FindFreeTimeTool,
     CreateEventTool,
 )
+from tools.rag_tool import IndexDocumentsTool, SearchDocumentsTool
 
 ALL_TOOLS = [
     TimeTool(),
@@ -22,6 +23,8 @@ ALL_TOOLS = [
     GetScheduleTool(),
     FindFreeTimeTool(),
     CreateEventTool(),
+    IndexDocumentsTool(),
+    SearchDocumentsTool(),
 ]
 
 __all__ = ["ALL_TOOLS"]

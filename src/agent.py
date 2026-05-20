@@ -64,21 +64,94 @@ HISTORY_FILE = Path(os.getenv("CONVERSATION_HISTORY_FILE", "conversation_history
 MAX_VERBATIM_EXCHANGES = 10
 
 
+def _sanitize_history(conversation: list[dict]) -> list[dict]:
+    """Last-resort guard: drop tool_result blocks with no matching tool_use in history.
+
+    The summariser now aligns its cutoff to a clean user text message, so it
+    should never split a tool_use/tool_result pair. This function exists as a
+    safety net for history files written by older versions of the agent (before
+    that fix) or any other edge case that produces an orphan. Without it, Claude
+    returns a 400 because every tool_result must reference a tool_use present in
+    the same conversation.
+    """
+    known_ids: set[str] = set()
+    for msg in conversation:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    known_ids.add(block["id"])
+
+    cleaned = []
+    for msg in conversation:
+        content = msg.get("content", "")
+        if not isinstance(content, list):
+            cleaned.append(msg)
+            continue
+        filtered = [
+            b for b in content
+            if not (
+                isinstance(b, dict)
+                and b.get("type") == "tool_result"
+                and b.get("tool_use_id") not in known_ids
+            )
+        ]
+        if filtered:
+            cleaned.append({**msg, "content": filtered})
+
+    return cleaned
+
+
 def load_history() -> list[dict]:
     """Load conversation history from disk; return empty list if none exists."""
     if HISTORY_FILE.exists():
         try:
-            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            return _sanitize_history(history)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Could not load history file: %s", e)
     return []
 
 
+def _strip_tool_blocks(conversation: list[dict]) -> list[dict]:
+    """Remove tool_use/tool_result blocks before persisting to disk.
+
+    Tool results reflect external state (documents, email, calendar) at the
+    moment of the call. Saving them causes Claude to trust stale data in the
+    next session instead of re-running the tool. Claude's text responses
+    already capture the outcome in human-readable form, so the raw API blocks
+    add no cross-session value.
+
+    Rules:
+    - Pure tool_result user messages → dropped entirely.
+    - Pure tool_use assistant messages → dropped entirely.
+    - Mixed assistant messages (text + tool_use) → text blocks kept, tool_use dropped.
+    """
+    stripped = []
+    for msg in conversation:
+        content = msg.get("content", "")
+        if not isinstance(content, list):
+            stripped.append(msg)
+            continue
+
+        text_blocks = [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        has_tool_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+
+        if has_tool_result:
+            continue  # pure tool_result user message — drop
+
+        if text_blocks:
+            stripped.append({**msg, "content": text_blocks})
+        # else: pure tool_use assistant message — drop
+
+    return stripped
+
+
 def save_history(conversation: list[dict]) -> None:
-    """Persist conversation history to disk."""
+    """Persist conversation history to disk, stripping ephemeral tool blocks."""
     try:
         HISTORY_FILE.write_text(
-            json.dumps(conversation, ensure_ascii=False, indent=2),
+            json.dumps(_strip_tool_blocks(conversation), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError as e:
@@ -130,6 +203,20 @@ def summarize_old_exchanges(conversation: list[dict]) -> list[dict]:
         return conversation
 
     cutoff = len(body) - MAX_VERBATIM_EXCHANGES * 2
+
+    # Walk backward until verbatim starts at a real user text message.
+    # A tool exchange is 3 messages (tool_use / tool_result / answer), so a
+    # fixed 2-message cutoff can land between tool_use and tool_result.
+    # User text messages always have str content; tool_result messages have list.
+    while cutoff > 0 and not (
+        body[cutoff].get("role") == "user"
+        and isinstance(body[cutoff].get("content"), str)
+    ):
+        cutoff -= 1
+
+    if cutoff == 0:
+        return conversation  # nothing safe to summarize
+
     to_summarize = body[:cutoff]
     verbatim = body[cutoff:]
 
@@ -220,6 +307,14 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
             model=MODEL,
             max_tokens=1024,
             tools=TOOLS,
+            system=(
+                "You are a personal work assistant with access to the user's documents, "
+                "email, calendar, and other tools.\n\n"
+                "Tool results in conversation history may be from a previous session and "
+                "could be stale. For any question involving current state — documents, "
+                "email, calendar, or time — always call the relevant tool to get fresh "
+                "data. Never answer from past tool results alone."
+            ),
             messages=conversation,
         )
         last_usage = response.usage

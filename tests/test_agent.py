@@ -6,12 +6,8 @@ Run from the project root:
 """
 
 import re
-import sys
-from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.time_tool import TimeTool
 from tools.calculator_tool import CalculatorTool
 from src.agent import execute_tool
