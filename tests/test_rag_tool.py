@@ -29,7 +29,7 @@ def _mock_engine(index_return=(5, ["file_a.txt"]), search_return=None):
     engine.index_directory.return_value = index_return
     engine.search.return_value = (
         search_return if search_return is not None
-        else [{"source": "file_a.txt", "text": "Some relevant text.", "score": 0.85}]
+        else [{"source": "file_a.txt", "text": "Some relevant text.", "score": 0.85, "doc_summary": "Summary of file_a."}]
     )
     return engine
 

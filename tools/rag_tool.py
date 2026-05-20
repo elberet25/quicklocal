@@ -4,6 +4,7 @@ import logging
 import sys
 from pathlib import Path
 
+import anthropic
 import chromadb
 from sentence_transformers import SentenceTransformer
 
@@ -25,8 +26,10 @@ MIN_CHUNK_CHARS = 50
 MIN_MERGE_CHARS = 150  # chunks shorter than this are merged into the following chunk
 SUPPORTED = {".pdf", ".txt", ".md"}
 
+DOC_SUMMARY_MIN_CHARS = 300  # documents shorter than this skip the Claude call
+
 # Increment whenever the chunking strategy changes (triggers automatic full reindex)
-CHUNKING_VERSION = 3
+CHUNKING_VERSION = 4
 
 
 def _is_allowed(path: Path) -> bool:
@@ -142,6 +145,32 @@ class RAGEngine:
         return merged
 
     # ------------------------------------------------------------------
+    # Document summarization
+    # ------------------------------------------------------------------
+
+    def _summarize_document(self, text: str, filename: str) -> str:
+        if len(text) < DOC_SUMMARY_MIN_CHARS:
+            return text
+        try:
+            client = anthropic.Anthropic()
+            truncated = text[:8000]
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Summarize this document in 3-5 sentences, focusing on its main topics "
+                        f"and key information. Document: {filename}\n\n{truncated}"
+                    ),
+                }],
+            )
+            return response.content[0].text.strip()
+        except Exception as e:
+            logger.warning("Could not summarize %s: %s", filename, e)
+            return ""
+
+    # ------------------------------------------------------------------
     # Core indexing (single file)
     # ------------------------------------------------------------------
 
@@ -159,10 +188,22 @@ class RAGEngine:
             chunk_id = hashlib.md5(f"{file}::{i}::{chunk[:80]}".encode()).hexdigest()
             ids.append(chunk_id)
             docs.append(chunk)
-            metas.append({"source": str(file), "chunk_index": i})
+            metas.append({"source": str(file), "chunk_index": i, "level": "chunk"})
 
         embeddings = self._model.encode(docs, show_progress_bar=False).tolist()
         self._collection.add(ids=ids, documents=docs, metadatas=metas, embeddings=embeddings)
+
+        summary = self._summarize_document(text, file.name)
+        if summary:
+            summary_id = hashlib.md5(f"{file}::doc_summary".encode()).hexdigest()
+            summary_embedding = self._model.encode([summary], show_progress_bar=False).tolist()
+            self._collection.add(
+                ids=[summary_id],
+                documents=[summary],
+                metadatas=[{"source": str(file), "level": "document"}],
+                embeddings=summary_embedding,
+            )
+
         return len(chunks)
 
     # ------------------------------------------------------------------
@@ -253,8 +294,8 @@ class RAGEngine:
     # Search
     # ------------------------------------------------------------------
 
-    def search(self, query: str, n_results: int = 5) -> list[dict]:
-        """Auto-sync all configured data dirs, then return best-matching chunks."""
+    def search(self, query: str, n_results: int = 3) -> list[dict]:
+        """Auto-sync all configured data dirs, then return best-matching chunks with doc summaries."""
         if not query or not query.strip():
             raise ValueError("query must not be empty")
 
@@ -262,17 +303,32 @@ class RAGEngine:
             if directory.exists():
                 self._sync_directory(directory)
 
-        count = self._collection.count()
-        if count == 0:
+        chunk_ids = self._collection.get(where={"level": "chunk"}, include=[])["ids"]
+        chunk_count = len(chunk_ids)
+        if chunk_count == 0:
             return []
 
-        n_results = min(n_results, count)
+        n_results = min(n_results, chunk_count)
         query_embedding = self._model.encode([query], show_progress_bar=False).tolist()
         results = self._collection.query(
             query_embeddings=query_embedding,
             n_results=n_results,
+            where={"level": "chunk"},
             include=["documents", "metadatas", "distances"],
         )
+
+        # Fetch document summaries for each unique source file in results
+        unique_source_paths = list(dict.fromkeys(
+            meta["source"] for meta in results["metadatas"][0]
+        ))
+        doc_summaries: dict[str, str] = {}
+        for source_path in unique_source_paths:
+            sr = self._collection.get(
+                where={"$and": [{"source": {"$eq": source_path}}, {"level": {"$eq": "document"}}]},
+                include=["documents"],
+            )
+            if sr["documents"]:
+                doc_summaries[Path(source_path).name] = sr["documents"][0]
 
         hits = []
         for doc, meta, dist in zip(
@@ -280,10 +336,12 @@ class RAGEngine:
             results["metadatas"][0],
             results["distances"][0],
         ):
+            source_name = Path(meta["source"]).name
             hits.append({
-                "source": Path(meta["source"]).name,
+                "source": source_name,
                 "text": doc,
                 "score": round(1 - dist, 3),  # cosine distance → similarity
+                "doc_summary": doc_summaries.get(source_name, ""),
             })
         return hits
 
@@ -374,8 +432,8 @@ class SearchDocumentsTool(BaseTool):
                     },
                     "n_results": {
                         "type": "integer",
-                        "description": "Number of results to return (default 5, max 20).",
-                        "default": 5,
+                        "description": "Number of results to return (default 3, max 20).",
+                        "default": 3,
                     },
                 },
                 "required": ["query"],
@@ -387,12 +445,26 @@ class SearchDocumentsTool(BaseTool):
             query = kwargs.get("query", "").strip()
             if not query:
                 return {"error": "query is required"}
-            n_results = min(int(kwargs.get("n_results", 5)), 20)
+            n_results = min(int(kwargs.get("n_results", 3)), 20)
             hits = RAGEngine.get().search(query, n_results)
             if not hits:
                 return {"result": "No documents indexed yet. Use the index_documents tool first."}
-            parts = [f"[{h['source']}] (score: {h['score']})\n{h['text'][:400]}" for h in hits]
-            return {"result": "\n\n---\n\n".join(parts)}
+
+            parts = []
+
+            # Prepend deduplicated document summaries as context
+            seen: dict[str, str] = {}
+            for h in hits:
+                if h["doc_summary"] and h["source"] not in seen:
+                    seen[h["source"]] = h["doc_summary"]
+            if seen:
+                context_lines = [f"[{src}]\n{summary}" for src, summary in seen.items()]
+                parts.append("=== Document Context ===\n\n" + "\n\n".join(context_lines))
+
+            chunk_parts = [f"[{h['source']}] (score: {h['score']})\n{h['text']}" for h in hits]
+            parts.append("=== Relevant Chunks ===\n\n" + "\n\n---\n\n".join(chunk_parts))
+
+            return {"result": "\n\n".join(parts)}
         except Exception as e:
             return self.handle_error(e)
 
@@ -411,6 +483,6 @@ def index_documents() -> int:
     return total
 
 
-def search_documents(query: str, n: int = 5) -> list[dict]:
-    """Search indexed documents. Returns list of {source, text, score} dicts."""
+def search_documents(query: str, n: int = 3) -> list[dict]:
+    """Search indexed documents. Returns list of {source, text, score, doc_summary} dicts."""
     return RAGEngine.get().search(query, n_results=n)
