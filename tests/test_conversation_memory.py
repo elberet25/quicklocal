@@ -3,6 +3,8 @@ Unit tests for conversation memory features in src/agent.py:
   - load_history / save_history / clear_history
   - _has_summary / _count_exchanges
   - summarize_old_exchanges
+  - _strip_tool_blocks
+  - _sanitize_history
 
 All summarization tests mock the Anthropic client — no real API calls.
 
@@ -11,17 +13,15 @@ Run from the project root:
 """
 
 import json
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import src.agent as agent
 from src.agent import (
     _count_exchanges,
     _has_summary,
+    _sanitize_history,
+    _strip_tool_blocks,
     clear_history,
     load_history,
     save_history,
@@ -204,3 +204,158 @@ class TestSummarizeOldExchanges:
         with self._patch_client():
             result = summarize_old_exchanges(conv)
         assert _has_summary(result)
+
+    def test_cutoff_does_not_split_tool_exchange(self):
+        """Cutoff must never land between a tool_use and its tool_result.
+
+        Build a conversation at exactly the verbatim limit, then append a full
+        tool exchange (user → assistant:tool_use → user:tool_result →
+        assistant:answer).  The summariser should keep the entire tool exchange
+        in the verbatim tail so no orphan tool_result is produced.
+        """
+        conv = _make_conversation(agent.MAX_VERBATIM_EXCHANGES)
+        tool_id = "test-tool-id-001"
+        tool_exchange = [
+            {"role": "user", "content": "search something"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": tool_id, "name": "search_documents", "input": {"query": "test"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": "some results"},
+            ]},
+            {"role": "assistant", "content": "Here is what I found."},
+        ]
+        conv += tool_exchange
+
+        with self._patch_client():
+            result = summarize_old_exchanges(conv)
+
+        # Collect all tool_use ids present in the result
+        tool_use_ids = set()
+        for msg in result:
+            if isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        tool_use_ids.add(block["id"])
+
+        # Every tool_result must have a matching tool_use in the same conversation
+        for msg in result:
+            if isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        assert block["tool_use_id"] in tool_use_ids, (
+                            f"Orphaned tool_result with id {block['tool_use_id']!r}"
+                        )
+
+
+# ---------------------------------------------------------------------------
+# _strip_tool_blocks
+# ---------------------------------------------------------------------------
+
+def _make_tool_exchange(tool_id="tool-abc", tool_name="search_documents"):
+    return [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tool_id, "name": tool_name, "input": {"query": "test"}},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": "results"},
+        ]},
+    ]
+
+
+class TestStripToolBlocks:
+    def test_plain_messages_pass_through_unchanged(self):
+        conv = _make_conversation(2)
+        assert _strip_tool_blocks(conv) == conv
+
+    def test_pure_tool_result_user_message_dropped(self):
+        conv = (
+            [{"role": "user", "content": "search my docs"}]
+            + _make_tool_exchange()
+            + [{"role": "assistant", "content": "Here is what I found."}]
+        )
+        result = _strip_tool_blocks(conv)
+        # Only the plain user message and final assistant text survive
+        assert len(result) == 2
+        assert result[0]["content"] == "search my docs"
+        assert result[1]["content"] == "Here is what I found."
+
+    def test_pure_tool_use_assistant_message_dropped(self):
+        conv = _make_tool_exchange()
+        result = _strip_tool_blocks(conv)
+        assert result == []
+
+    def test_mixed_assistant_message_keeps_text_only(self):
+        conv = [{"role": "assistant", "content": [
+            {"type": "text", "text": "Let me look that up."},
+            {"type": "tool_use", "id": "x", "name": "foo", "input": {}},
+        ]}]
+        result = _strip_tool_blocks(conv)
+        assert len(result) == 1
+        assert result[0]["content"] == [{"type": "text", "text": "Let me look that up."}]
+
+    def test_save_history_strips_tool_blocks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(agent, "HISTORY_FILE", tmp_path / "history.json")
+        conv = (
+            [{"role": "user", "content": "search my docs"}]
+            + _make_tool_exchange()
+            + [{"role": "assistant", "content": "Here is what I found."}]
+        )
+        save_history(conv)
+        saved = json.loads((tmp_path / "history.json").read_text())
+        for msg in saved:
+            assert isinstance(msg["content"], str), (
+                f"Expected str content after stripping, got: {msg['content']!r}"
+            )
+
+    def test_multiple_tool_exchanges_all_stripped(self):
+        conv = (
+            [{"role": "user", "content": "first question"}]
+            + _make_tool_exchange(tool_id="t1")
+            + [{"role": "assistant", "content": "First answer."}]
+            + [{"role": "user", "content": "second question"}]
+            + _make_tool_exchange(tool_id="t2")
+            + [{"role": "assistant", "content": "Second answer."}]
+        )
+        result = _strip_tool_blocks(conv)
+        assert len(result) == 4
+        assert all(isinstance(m["content"], str) for m in result)
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_history
+# ---------------------------------------------------------------------------
+
+class TestSanitizeHistory:
+    def test_clean_conversation_unchanged(self):
+        conv = _make_conversation(3)
+        assert _sanitize_history(conv) == conv
+
+    def test_orphaned_tool_result_dropped(self):
+        conv = [
+            {"role": "user", "content": "hello"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "ghost-id", "content": "stale result"},
+            ]},
+            {"role": "assistant", "content": "Done."},
+        ]
+        result = _sanitize_history(conv)
+        # The orphaned tool_result user message should be gone
+        assert all(isinstance(m["content"], str) for m in result)
+        assert len(result) == 2
+
+    def test_matched_tool_pair_preserved(self):
+        tool_id = "real-id"
+        conv = (
+            [{"role": "user", "content": "search"}]
+            + [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": tool_id, "name": "search_documents", "input": {}},
+            ]}]
+            + [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": tool_id, "content": "results"},
+            ]}]
+            + [{"role": "assistant", "content": "Found it."}]
+        )
+        result = _sanitize_history(conv)
+        # All four messages should survive — the pair is intact
+        assert len(result) == 4
