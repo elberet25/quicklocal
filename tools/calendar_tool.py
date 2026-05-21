@@ -28,6 +28,8 @@ except ImportError:
 class CalendarBaseTool(BaseTool):
     """Shared auth and helpers for all Calendar tools."""
 
+    category = "calendar"
+    summarizable = True
     _SCOPES = [
         "https://www.googleapis.com/auth/calendar.readonly",
         "https://www.googleapis.com/auth/calendar.events",

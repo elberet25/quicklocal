@@ -32,6 +32,8 @@ except ImportError:
 class GmailBaseTool(BaseTool):
     """Shared auth and helpers for all Gmail tools."""
 
+    category = "gmail"
+    summarizable = True
     _SCOPES = [
         "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/gmail.compose",

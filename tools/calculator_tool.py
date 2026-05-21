@@ -6,6 +6,7 @@ except ImportError:
 
 class CalculatorTool(BaseTool):
     name = "calculate"
+    category = "utility"
 
     def get_description(self) -> dict:
         return {

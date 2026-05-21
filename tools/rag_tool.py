@@ -354,6 +354,7 @@ class RAGEngine:
 
 class IndexDocumentsTool(BaseTool):
     name = "index_documents"
+    category = "rag"
 
     def get_description(self) -> dict:
         allowed = ", ".join(str(d) for d in get_data_dirs())
@@ -416,6 +417,8 @@ class IndexDocumentsTool(BaseTool):
 
 class SearchDocumentsTool(BaseTool):
     name = "search_documents"
+    category = "rag"
+    summarizable = True
 
     def get_description(self) -> dict:
         return {

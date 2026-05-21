@@ -8,6 +8,7 @@ except ImportError:
 
 class TimeTool(BaseTool):
     name = "get_current_time"
+    category = "utility"
 
     def get_description(self) -> dict:
         return {

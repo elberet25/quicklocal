@@ -3,6 +3,8 @@ from abc import ABC, abstractmethod
 
 class BaseTool(ABC):
     name: str
+    category: str = "utility"
+    summarizable: bool = False
 
     @abstractmethod
     def get_description(self) -> dict:

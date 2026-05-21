@@ -19,6 +19,7 @@ import pytest
 import src.agent as agent
 from src.agent import (
     _count_exchanges,
+    _format_tool_input,
     _has_summary,
     _sanitize_history,
     _strip_tool_blocks,
@@ -46,6 +47,27 @@ def _make_conversation(n_exchanges):
     for i in range(n_exchanges):
         conv += _make_exchange(f"user message {i}", f"assistant reply {i}")
     return conv
+
+
+def _make_live_tool_exchange(tool_id="tid-001", tool_name="search_documents",
+                             tool_input=None, result="some results"):
+    """Return 4 messages for a full in-memory tool exchange.
+
+    Structure: user question → assistant tool_use → user tool_result → assistant answer.
+    Place this before enough plain exchanges to push it into the to_summarize portion.
+    """
+    if tool_input is None:
+        tool_input = {"query": "test query"}
+    return [
+        {"role": "user", "content": "search my docs"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tool_id, "name": tool_name, "input": tool_input},
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": result},
+        ]},
+        {"role": "assistant", "content": "Here is what I found."},
+    ]
 
 
 def _make_summary_pair(text="Earlier summary."):
@@ -205,6 +227,52 @@ class TestSummarizeOldExchanges:
             result = summarize_old_exchanges(conv)
         assert _has_summary(result)
 
+    def _capture_transcript(self, conv):
+        """Run summarize_old_exchanges and return the transcript string sent to Claude."""
+        mock_create = MagicMock(return_value=_mock_summary_response())
+        with patch.object(agent.client.messages, "create", mock_create):
+            summarize_old_exchanges(conv)
+        return mock_create.call_args.kwargs["messages"][0]["content"]
+
+    def test_summarizable_tool_use_annotated_in_transcript(self):
+        """tool_use for a summarizable tool produces a [Used ...] line in the transcript."""
+        conv = (
+            _make_live_tool_exchange(tool_name="search_documents", tool_input={"query": "meeting notes"})
+            + _make_conversation(agent.MAX_VERBATIM_EXCHANGES + 1)
+        )
+        transcript = self._capture_transcript(conv)
+        assert "[Used search_documents:" in transcript
+
+    def test_non_summarizable_tool_use_not_in_transcript(self):
+        """tool_use for a non-summarizable tool is silently skipped."""
+        conv = (
+            _make_live_tool_exchange(tool_name="calculate", tool_input={"operation": "add", "a": 1, "b": 2})
+            + _make_conversation(agent.MAX_VERBATIM_EXCHANGES + 1)
+        )
+        transcript = self._capture_transcript(conv)
+        assert "[Used calculate:" not in transcript
+
+    def test_summarizable_tool_result_annotated_in_transcript(self):
+        """tool_result for a summarizable tool produces a [Result: ...] line in the transcript."""
+        conv = (
+            _make_live_tool_exchange(tool_name="search_documents", result="Found notes from the Q4 planning meeting.")
+            + _make_conversation(agent.MAX_VERBATIM_EXCHANGES + 1)
+        )
+        transcript = self._capture_transcript(conv)
+        assert "[Result:" in transcript
+        assert "Q4 planning meeting" in transcript
+
+    def test_tool_result_truncated_at_200_chars(self):
+        """Results longer than 200 chars are truncated with '...' in the transcript."""
+        long_result = "x" * 250
+        conv = (
+            _make_live_tool_exchange(tool_name="search_documents", result=long_result)
+            + _make_conversation(agent.MAX_VERBATIM_EXCHANGES + 1)
+        )
+        transcript = self._capture_transcript(conv)
+        assert "[Result: " + "x" * 200 + "..." in transcript
+        assert "x" * 201 not in transcript
+
     def test_cutoff_does_not_split_tool_exchange(self):
         """Cutoff must never land between a tool_use and its tool_result.
 
@@ -359,3 +427,20 @@ class TestSanitizeHistory:
         result = _sanitize_history(conv)
         # All four messages should survive — the pair is intact
         assert len(result) == 4
+
+
+# ---------------------------------------------------------------------------
+# _format_tool_input
+# ---------------------------------------------------------------------------
+
+class TestFormatToolInput:
+    def test_empty_dict_returns_no_input(self):
+        assert _format_tool_input({}) == "no input"
+
+    def test_single_key(self):
+        assert _format_tool_input({"query": "emails"}) == "query='emails'"
+
+    def test_multiple_keys(self):
+        result = _format_tool_input({"a": 1, "b": 2})
+        assert result == "a=1, b=2"
+

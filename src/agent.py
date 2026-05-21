@@ -49,6 +49,23 @@ client = anthropic.Anthropic()
 # ---------------------------------------------------------------------------
 MODEL = "claude-sonnet-4-6"
 
+SYSTEM_PROMPT = """\
+## Role
+You are QuickLocal, a personal AI work assistant. You help the user manage their work across Gmail, Google Calendar, and local documents. You are concise, accurate, and always confirm before taking actions that write or modify data.
+
+## Tool Guidance
+- For email tasks (reading, searching, drafting replies) → use gmail_* tools
+- For calendar tasks (schedule, free time, creating events) → use calendar_* tools
+- For searching or indexing local documents → use rag_* tools
+- Always call preview_draft_reply before create_draft_reply — never skip the preview step
+- When multiple tools could apply, prefer the most specific one
+
+## Memory
+Tool results in conversation history may be from a previous session and could be stale. \
+For any question involving current state — documents, email, calendar, or time — always \
+call the relevant tool to get fresh data. Never answer from past tool results alone.\
+"""
+
 # ---------------------------------------------------------------------------
 # 3. TOOL REGISTRY
 # ---------------------------------------------------------------------------
@@ -190,6 +207,13 @@ def _has_summary(conversation: list[dict]) -> bool:
     )
 
 
+def _format_tool_input(tool_input: dict) -> str:
+    """Format a tool input dict as a brief human-readable string."""
+    if not tool_input:
+        return "no input"
+    return ", ".join(f"{k}={v!r}" for k, v in tool_input.items())
+
+
 def summarize_old_exchanges(conversation: list[dict]) -> list[dict]:
     """Replace exchanges older than MAX_VERBATIM_EXCHANGES with a summary.
 
@@ -221,14 +245,30 @@ def summarize_old_exchanges(conversation: list[dict]) -> list[dict]:
     verbatim = body[cutoff:]
 
     # Build a readable transcript for Claude to summarize.
+    # Summarizable tool calls are annotated; non-summarizable ones are skipped.
+    summarizable_ids: set[str] = set()
     transcript_lines = []
     for msg in to_summarize:
         role = msg.get("role", "")
         content = msg.get("content", "")
-        if isinstance(content, list):
-            # tool_use / tool_result blocks — skip, not useful in summary
+        if not isinstance(content, list):
+            transcript_lines.append(f"{role.upper()}: {content}")
             continue
-        transcript_lines.append(f"{role.upper()}: {content}")
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool = tool_registry.get(block["name"])
+                if tool and tool.summarizable:
+                    summarizable_ids.add(block["id"])
+                    input_desc = _format_tool_input(block.get("input", {}))
+                    transcript_lines.append(f"[Used {block['name']}: {input_desc}]")
+            elif block.get("type") == "tool_result":
+                if block.get("tool_use_id") in summarizable_ids:
+                    result_text = str(block.get("content", ""))
+                    if len(result_text) > 200:
+                        result_text = result_text[:200] + "..."
+                    transcript_lines.append(f"[Result: {result_text}]")
 
     transcript = "\n\n".join(transcript_lines)
 
@@ -307,14 +347,7 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
             model=MODEL,
             max_tokens=1024,
             tools=TOOLS,
-            system=(
-                "You are a personal work assistant with access to the user's documents, "
-                "email, calendar, and other tools.\n\n"
-                "Tool results in conversation history may be from a previous session and "
-                "could be stale. For any question involving current state — documents, "
-                "email, calendar, or time — always call the relevant tool to get fresh "
-                "data. Never answer from past tool results alone."
-            ),
+            system=SYSTEM_PROMPT,
             messages=conversation,
         )
         last_usage = response.usage
