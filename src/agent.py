@@ -375,7 +375,7 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
     while True:
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=4096,
             tools=TOOLS,
             system=SYSTEM_PROMPT,
             messages=conversation,
@@ -401,6 +401,15 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
                     "content": result_text,
                 })
             conversation.append({"role": "user", "content": tool_results})
+        elif response.stop_reason == "max_tokens":
+            partial = next(
+                (block.text for block in response.content if block.type == "text"), ""
+            )
+            logger.warning("Response hit token limit; partial text length: %d chars", len(partial))
+            return (
+                partial + "\n\n*(Response truncated — token limit reached.)*" if partial
+                else "*(Response truncated before any text was generated.)*"
+            ), last_usage
         else:
             raise RuntimeError(f"Unexpected stop_reason: {response.stop_reason!r}")
 
