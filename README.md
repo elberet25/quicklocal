@@ -26,6 +26,7 @@ The goal is to keep adding tools until the assistant covers the main places wher
 | Google Drive (search files, read Google Docs, create Google Docs) | Done |
 | Unified search across local files + Notion + Drive | Done |
 | Slack integration (read channels, search, draft messages) | Done |
+| Write actions with confirmation gate (preview + y/n confirm for Calendar, Drive, Notion) | Done |
 | Multimodal (screenshots, images) | Planned |
 
 ## Tech Stack
@@ -53,6 +54,7 @@ quicklocal/
 │   ├── drive_tool.py         # Google Drive search/read/create
 │   ├── unified_search_tool.py # Search all sources at once
 │   ├── slack_tool.py         # Slack read/search/draft
+│   ├── error_utils.py        # Error classification + retryable flag
 │   ├── time_tool.py          # Current time/date
 │   └── calculator_tool.py
 ├── scripts/

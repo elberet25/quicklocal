@@ -324,6 +324,8 @@ def execute_tool(name: str, tool_input: dict) -> str:
     tool = tool_registry.get(name)
     if tool is None:
         return f"Error: unknown tool '{name}'"
+    if not tool.validate_input(**tool_input):
+        return f"Error: invalid input for '{name}' — required fields missing or incorrectly formatted."
     if tool.requires_confirmation:
         print(f"\n{tool.get_confirmation_message(**tool_input)}")
         answer = input("Proceed? (y/n): ").strip().lower()

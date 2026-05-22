@@ -1,5 +1,5 @@
 """
-Unit tests for execute_tool() dispatcher behavior: retry logic and confirmation gate.
+Unit tests for execute_tool() dispatcher behavior: validation, retry, confirmation gate.
 
 Run from the project root:
     pytest tests/test_execute_tool.py -v
@@ -9,6 +9,43 @@ from unittest.mock import patch
 
 import pytest
 from src.agent import execute_tool, tool_registry, MAX_TOOL_RETRIES
+
+
+class TestValidateInputPreFlight:
+    """validate_input() runs before confirmation and before execute()."""
+
+    def test_invalid_input_returns_error(self):
+        # CreateEventTool.validate_input rejects bad datetimes
+        result = execute_tool("create_event", {
+            "summary": "Sync",
+            "start": "not-a-date",
+            "end": "2026-05-23T15:00:00",
+        })
+        assert "Error" in result
+        assert "invalid input" in result.lower()
+
+    def test_invalid_input_does_not_call_execute(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        called = []
+        with patch.object(tool_registry["create_event"], "execute",
+                          side_effect=lambda **kw: called.append(True) or {"result": "ok"}):
+            execute_tool("create_event", {
+                "summary": "",
+                "start": "2026-05-23T14:00:00",
+                "end": "2026-05-23T15:00:00",
+            })
+        assert called == []
+
+    def test_valid_input_passes_through(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with patch.object(tool_registry["create_event"], "execute",
+                          return_value={"result": "event created"}):
+            result = execute_tool("create_event", {
+                "summary": "Team Sync",
+                "start": "2026-05-23T14:00:00",
+                "end": "2026-05-23T15:00:00",
+            })
+        assert result == "event created"
 
 
 class TestRetryBehavior:
