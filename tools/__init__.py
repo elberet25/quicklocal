@@ -13,6 +13,7 @@ from tools.calendar_tool import (
 )
 from tools.rag_tool import IndexDocumentsTool, SearchDocumentsTool
 from tools.notion_tool import SearchNotionTool, GetNotionPageTool
+from tools.drive_tool import SearchDriveTool, ReadDriveDocumentTool
 
 ALL_TOOLS = [
     TimeTool(),
@@ -28,6 +29,8 @@ ALL_TOOLS = [
     SearchDocumentsTool(),
     SearchNotionTool(),
     GetNotionPageTool(),
+    SearchDriveTool(),
+    ReadDriveDocumentTool(),
 ]
 
 __all__ = ["ALL_TOOLS"]
