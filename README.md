@@ -13,7 +13,7 @@ The goal is to keep adding tools until the assistant covers the main places wher
 - **Action execution** — draft emails, create docs, schedule meetings
 - **Conversation memory** — context persists across sessions
 
-## What's Built (MVP)
+## What's Built
 
 | Capability | Status |
 |---|---|
@@ -22,16 +22,18 @@ The goal is to keep adding tools until the assistant covers the main places wher
 | RAG over local files (hierarchical: chunk + doc summaries) | Done |
 | Persistent conversation memory with rolling summarization | Done |
 | Multi-tool orchestration via Claude tool use | Done |
+| Notion (search pages, read content, create pages) | Done |
+| Google Drive (search files, read Google Docs, create Google Docs) | Done |
+| Unified search across local files + Notion + Drive | Done |
 | Slack integration | Planned |
-| Notion / Google Drive | Planned |
 | Multimodal (screenshots, images) | Planned |
 
 ## Tech Stack
 
 - **LLM**: Claude Sonnet (Anthropic API) with native tool use
-- **RAG**: ChromaDB (vector store) + sentence-transformers (embeddings)
-- **Google APIs**: Gmail, Calendar, Drive (OAuth 2.0)
-- **Notion API** (planned)
+- **RAG**: ChromaDB (vector store) + sentence-transformers (embeddings) + PyMuPDF (PDF extraction)
+- **Google APIs**: Gmail, Calendar, Drive + Docs (OAuth 2.0)
+- **Notion API**: `notion-client` library, integration token auth
 - **Slack API** (planned)
 - **Multimodal** — vision-language understanding for screenshots and documents (planned)
 - **Memory**: rolling summarization — last 10 exchanges verbatim, older turns condensed by Claude
@@ -43,17 +45,21 @@ quicklocal/
 ├── src/
 │   └── agent.py          # Agent loop, conversation memory, tool dispatch
 ├── tools/
-│   ├── base_tool.py      # Tool interface
-│   ├── gmail_tool.py     # Gmail read/search/draft
-│   ├── calendar_tool.py  # Google Calendar read/create
-│   ├── rag_tool.py       # Local file RAG
-│   ├── time_tool.py      # Current time/date
+│   ├── base_tool.py          # Tool interface
+│   ├── gmail_tool.py         # Gmail read/search/draft
+│   ├── calendar_tool.py      # Google Calendar read/create
+│   ├── rag_tool.py           # Local file RAG
+│   ├── notion_tool.py        # Notion search/read/create
+│   ├── drive_tool.py         # Google Drive search/read/create
+│   ├── unified_search_tool.py # Search all sources at once
+│   ├── time_tool.py          # Current time/date
 │   └── calculator_tool.py
 ├── scripts/
-│   ├── index_docs.py          # Index local documents into ChromaDB
-│   ├── search_docs.py         # CLI: search the vector store directly
-│   ├── check_chunking.py      # Diagnostic: inspect chunks for sampled files
-│   └── check_summaries.py     # Diagnostic: inspect stored document summaries
+│   ├── index_docs.py              # Index local documents into ChromaDB
+│   ├── search_docs.py             # CLI: search the vector store directly
+│   ├── check_chunking.py          # Diagnostic: inspect chunks for sampled files
+│   ├── check_summaries.py         # Diagnostic: inspect stored document summaries
+│   └── check_pdf_extraction.py    # Diagnostic: compare pypdf/pdfplumber/pymupdf output
 ├── tests/
 ├── config.py             # Data directory config (reads from .env)
 ├── requirements.txt
@@ -66,7 +72,7 @@ quicklocal/
 
 - Python 3.11+
 - Anthropic API key
-- Google Cloud project with Gmail and Calendar APIs enabled
+- Google Cloud project with Gmail, Calendar, Drive, and Docs APIs enabled
 
 ### Install
 
@@ -83,11 +89,14 @@ Copy `.env.example` to `.env` and fill in:
 ```env
 ANTHROPIC_API_KEY=your_key_here
 GOOGLE_CREDENTIALS_PATH=credentials.json   # OAuth client credentials from Google Cloud Console
+NOTION_TOKEN=your_notion_integration_token # From Notion → Settings → Connections → Integrations
 QUICKLOCAL_DATA_DIRS=~/path/to/your/docs   # comma-separated
 CONVERSATION_HISTORY_FILE=conversation_history.json
 ```
 
-For Google APIs, create a project in Google Cloud Console, enable Gmail and Calendar APIs, and download the OAuth client credentials as `credentials.json`. On first run, the agent will open a browser for consent.
+For Google APIs, create a project in Google Cloud Console, enable Gmail, Calendar, Drive, and Docs APIs, and download the OAuth client credentials as `credentials.json`. On first run per service, the agent opens a browser for consent — separate token files are created for each service (`token.json`, `calendar_token.json`, `drive_token.json`).
+
+For Notion, create an integration at notion.so/my-integrations, copy the token, and share each page with the integration from the Notion sidebar.
 
 ### Index your documents
 
@@ -123,7 +132,11 @@ python src/agent.py
 ```
 You: What meetings do I have tomorrow?
 You: Summarize the last 3 emails from my manager
-You: What does my notes say about the Q3 roadmap?
+You: What do my notes say about the Q3 roadmap?
+You: Search everything for meeting notes about the API redesign
+You: Find my Notion pages about the ML project
+You: Create a Google Doc summarising today's standup
+You: Create a Notion page under my Meeting Notes with a summary of last week
 You: /clear    ← reset conversation
 ```
 
