@@ -42,7 +42,7 @@ logger.setLevel(logging.DEBUG)
 # ---------------------------------------------------------------------------
 # 1. CLIENT
 # ---------------------------------------------------------------------------
-client = anthropic.Anthropic()
+client = anthropic.Anthropic(max_retries=3)
 
 # ---------------------------------------------------------------------------
 # 2. MODEL
@@ -51,7 +51,7 @@ MODEL = "claude-sonnet-4-6"
 
 SYSTEM_PROMPT = """\
 ## Role
-You are QuickLocal, a personal AI work assistant. You help the user manage their work across Gmail, Google Calendar, local documents, Notion, and Google Drive. You are concise, accurate, and always confirm before taking actions that write or modify data.
+You are QuickLocal, a personal AI work assistant. You help the user manage their work across Gmail, Google Calendar, local documents, Notion, Google Drive, and Slack. You are concise, accurate, and always confirm before taking actions that write or modify data.
 
 ## Tool Guidance
 - For email tasks (reading, searching, drafting replies) → use gmail_* tools
@@ -60,6 +60,8 @@ You are QuickLocal, a personal AI work assistant. You help the user manage their
 - For Notion tasks (finding pages, reading content, creating pages) → use search_notion, get_notion_page, create_notion_page
 - For Google Drive tasks (finding files, reading Google Docs) → use search_drive, read_drive_document
 - For creating a Google Doc → always call preview_drive_doc first, show the preview to the user, and only call create_drive_doc after explicit confirmation
+- For Slack tasks (reading a channel, searching messages) → use get_channel_messages or search_slack; use get_slack_user_info to resolve any raw user ID you encounter into a display name
+- For drafting a Slack message → always use draft_slack_message first and wait for explicit user confirmation before any further action
 - For broad searches across all knowledge sources at once → use search_all_knowledge
 - Always call preview_draft_reply before create_draft_reply — never skip the preview step
 - When multiple tools could apply, prefer the most specific one
@@ -416,7 +418,10 @@ def main() -> None:
         conversation.append({"role": "assistant", "content": answer})
 
         # Summarize if the conversation has grown beyond the verbatim window.
-        conversation = summarize_old_exchanges(conversation)
+        try:
+            conversation = summarize_old_exchanges(conversation)
+        except Exception as e:
+            logger.warning("Summarization failed, continuing with full history: %s", e)
 
         save_history(conversation)
 
