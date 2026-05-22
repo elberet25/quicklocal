@@ -1,3 +1,4 @@
+notion-client>=2.0.0
 annotated-types==0.7.0
 chromadb>=1.0.0
 sentence-transformers>=3.0.0
