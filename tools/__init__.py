@@ -9,6 +9,7 @@ from tools.gmail_tool import (
 from tools.calendar_tool import (
     GetScheduleTool,
     FindFreeTimeTool,
+    PreviewEventTool,
     CreateEventTool,
 )
 from tools.rag_tool import IndexDocumentsTool, SearchDocumentsTool
@@ -26,6 +27,7 @@ ALL_TOOLS = [
     CreateDraftReplyTool(),
     GetScheduleTool(),
     FindFreeTimeTool(),
+    PreviewEventTool(),
     CreateEventTool(),
     IndexDocumentsTool(),
     SearchDocumentsTool(),

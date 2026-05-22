@@ -16,6 +16,7 @@ from tools.calendar_tool import (
     CalendarBaseTool,
     GetScheduleTool,
     FindFreeTimeTool,
+    PreviewEventTool,
     CreateEventTool,
 )
 
@@ -274,6 +275,73 @@ class TestFindFreeTimeTool:
         with patch.object(CalendarBaseTool, "_get_calendar_service", side_effect=Exception("Auth error")):
             result = self.tool.execute(date="2024-01-15")
         assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# PreviewEventTool
+# ---------------------------------------------------------------------------
+
+class TestPreviewEventTool:
+    def setup_method(self):
+        self.tool = PreviewEventTool()
+
+    def _base(self, **kwargs):
+        defaults = {"summary": "Team Sync", "start": "2024-01-15T14:00:00", "end": "2024-01-15T15:00:00"}
+        return self.tool.execute(**{**defaults, **kwargs})
+
+    def test_returns_result_key(self):
+        assert "result" in self._base()
+
+    def test_contains_title(self):
+        assert "Team Sync" in self._base()["result"]
+
+    def test_contains_start_and_end(self):
+        result = self._base()["result"]
+        assert "2024-01-15T14:00:00" in result
+        assert "2024-01-15T15:00:00" in result
+
+    def test_includes_location_when_provided(self):
+        assert "Conference Room A" in self._base(location="Conference Room A")["result"]
+
+    def test_omits_location_when_not_provided(self):
+        assert "Location" not in self._base()["result"]
+
+    def test_includes_description_when_provided(self):
+        assert "Bring slides" in self._base(description="Bring slides")["result"]
+
+    def test_omits_description_when_not_provided(self):
+        assert "Notes" not in self._base()["result"]
+
+    def test_no_api_call_needed(self):
+        # No credentials — execute must complete without auth
+        result = self._base()
+        assert "result" in result
+        assert "error" not in result
+
+    def test_validate_input_accepts_valid_inputs(self):
+        assert self.tool.validate_input(
+            summary="Sync", start="2024-01-15T14:00:00", end="2024-01-15T15:00:00"
+        ) is True
+
+    def test_validate_input_rejects_missing_summary(self):
+        assert self.tool.validate_input(
+            summary="", start="2024-01-15T14:00:00", end="2024-01-15T15:00:00"
+        ) is False
+
+    def test_validate_input_rejects_invalid_datetime(self):
+        assert self.tool.validate_input(
+            summary="Sync", start="not-a-date", end="2024-01-15T15:00:00"
+        ) is False
+
+    def test_requires_confirmation_is_false(self):
+        assert PreviewEventTool.requires_confirmation is False
+
+    def test_summarizable_is_false(self):
+        assert PreviewEventTool.summarizable is False
+
+    def test_description_references_create_event(self):
+        desc = self.tool.get_description()
+        assert "create_event" in desc["description"]
 
 
 # ---------------------------------------------------------------------------
