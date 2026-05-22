@@ -15,6 +15,7 @@ from tools.notion_tool import (
     NotionBaseTool,
     SearchNotionTool,
     GetNotionPageTool,
+    CreateNotionPageTool,
 )
 
 
@@ -307,3 +308,121 @@ class TestGetNotionPageTool:
 
     def test_category_is_notion(self):
         assert GetNotionPageTool.category == "notion"
+
+
+# ---------------------------------------------------------------------------
+# CreateNotionPageTool._text_to_blocks
+# ---------------------------------------------------------------------------
+
+class TestTextToBlocks:
+    def test_converts_single_paragraph(self):
+        blocks = CreateNotionPageTool._text_to_blocks("Hello world")
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "paragraph"
+        assert blocks[0]["paragraph"]["rich_text"][0]["text"]["content"] == "Hello world"
+
+    def test_splits_on_blank_lines(self):
+        blocks = CreateNotionPageTool._text_to_blocks("First para\n\nSecond para")
+        assert len(blocks) == 2
+        assert blocks[0]["paragraph"]["rich_text"][0]["text"]["content"] == "First para"
+        assert blocks[1]["paragraph"]["rich_text"][0]["text"]["content"] == "Second para"
+
+    def test_skips_empty_paragraphs(self):
+        blocks = CreateNotionPageTool._text_to_blocks("Real\n\n\n\nContent")
+        assert len(blocks) == 2
+
+    def test_returns_empty_list_for_blank_input(self):
+        blocks = CreateNotionPageTool._text_to_blocks("   \n\n   ")
+        assert blocks == []
+
+
+# ---------------------------------------------------------------------------
+# CreateNotionPageTool
+# ---------------------------------------------------------------------------
+
+class TestCreateNotionPageTool:
+    def _tool(self):
+        return CreateNotionPageTool()
+
+    def test_validate_input_requires_title_and_content(self):
+        tool = self._tool()
+        assert tool.validate_input(title="T", content="C") is True
+        assert tool.validate_input(title="T") is False
+        assert tool.validate_input(content="C") is False
+        assert tool.validate_input() is False
+
+    def test_creates_page_with_parent(self, monkeypatch):
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        mock_client = MagicMock()
+        mock_client.pages.create.return_value = {
+            "id": "new-page-123",
+            "url": "https://notion.so/new-page-123",
+        }
+        with patch("tools.notion_tool.Client", return_value=mock_client):
+            result = self._tool().execute(
+                title="Meeting Summary",
+                content="We discussed the project.",
+                parent_page_id="parent-456",
+            )
+
+        assert "error" not in result
+        data = json.loads(result["result"])
+        assert data["status"] == "Page created"
+        assert data["page_id"] == "new-page-123"
+        assert data["title"] == "Meeting Summary"
+
+        call_kwargs = mock_client.pages.create.call_args.kwargs
+        assert call_kwargs["parent"] == {"type": "page_id", "page_id": "parent-456"}
+
+    def test_creates_page_at_workspace_root_when_no_parent(self, monkeypatch):
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        mock_client = MagicMock()
+        mock_client.pages.create.return_value = {
+            "id": "root-page-789",
+            "url": "https://notion.so/root-page-789",
+        }
+        with patch("tools.notion_tool.Client", return_value=mock_client):
+            result = self._tool().execute(title="New Page", content="Content here")
+
+        assert "error" not in result
+        call_kwargs = mock_client.pages.create.call_args.kwargs
+        assert call_kwargs["parent"] == {"type": "workspace", "workspace": True}
+
+    def test_content_converted_to_blocks(self, monkeypatch):
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        mock_client = MagicMock()
+        mock_client.pages.create.return_value = {"id": "p1", "url": ""}
+        with patch("tools.notion_tool.Client", return_value=mock_client):
+            self._tool().execute(
+                title="T",
+                content="First para\n\nSecond para",
+                parent_page_id="parent-1",
+            )
+
+        call_kwargs = mock_client.pages.create.call_args.kwargs
+        children = call_kwargs["children"]
+        assert len(children) == 2
+        assert children[0]["type"] == "paragraph"
+        assert children[1]["type"] == "paragraph"
+
+    def test_returns_error_on_api_failure(self, monkeypatch):
+        monkeypatch.setenv("NOTION_TOKEN", "test-token")
+        mock_client = MagicMock()
+        mock_client.pages.create.side_effect = Exception("API error")
+        with patch("tools.notion_tool.Client", return_value=mock_client):
+            result = self._tool().execute(title="T", content="C", parent_page_id="p1")
+
+        assert "error" in result
+
+    def test_description_name_is_correct(self):
+        assert self._tool().get_description()["name"] == "create_notion_page"
+
+    def test_description_mentions_confirmation(self):
+        desc = self._tool().get_description()["description"]
+        assert "confirm" in desc.lower()
+
+    def test_summarizable_is_true(self):
+        assert CreateNotionPageTool.summarizable is True
+
+    def test_category_is_notion(self):
+        assert CreateNotionPageTool.category == "notion"

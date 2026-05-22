@@ -15,6 +15,8 @@ from tools.drive_tool import (
     DriveBaseTool,
     SearchDriveTool,
     ReadDriveDocumentTool,
+    PreviewDriveDocTool,
+    CreateDriveDocTool,
     GOOGLE_DOC_MIME,
 )
 
@@ -234,3 +236,105 @@ class TestReadDriveDocumentTool:
 
     def test_category_is_drive(self):
         assert ReadDriveDocumentTool.category == "drive"
+
+
+# ---------------------------------------------------------------------------
+# PreviewDriveDocTool
+# ---------------------------------------------------------------------------
+
+class TestPreviewDriveDocTool:
+    def _tool(self):
+        return PreviewDriveDocTool()
+
+    def test_returns_preview_without_api_call(self):
+        result = self._tool().execute(title="My Doc", content="Hello world")
+        assert "error" not in result
+        data = json.loads(result["result"])
+        assert data["status"] == "PREVIEW — not created yet"
+        assert data["title"] == "My Doc"
+        assert data["content"] == "Hello world"
+
+    def test_validate_input_requires_title_and_content(self):
+        tool = self._tool()
+        assert tool.validate_input(title="T", content="C") is True
+        assert tool.validate_input(title="T") is False
+        assert tool.validate_input(content="C") is False
+        assert tool.validate_input() is False
+
+    def test_description_name_is_correct(self):
+        assert self._tool().get_description()["name"] == "preview_drive_doc"
+
+    def test_description_says_call_first(self):
+        desc = self._tool().get_description()["description"]
+        assert "ALWAYS" in desc or "first" in desc.lower()
+
+
+# ---------------------------------------------------------------------------
+# CreateDriveDocTool
+# ---------------------------------------------------------------------------
+
+class TestCreateDriveDocTool:
+    def _tool(self):
+        return CreateDriveDocTool()
+
+    def test_validate_input_requires_title_and_content(self):
+        tool = self._tool()
+        assert tool.validate_input(title="T", content="C") is True
+        assert tool.validate_input(title="T") is False
+        assert tool.validate_input(content="C") is False
+        assert tool.validate_input() is False
+
+    def test_creates_doc_and_returns_metadata(self):
+        mock_drive = MagicMock()
+        mock_drive.files().create().execute.return_value = {
+            "id": "new-file-123",
+            "webViewLink": "https://docs.google.com/document/d/new-file-123",
+        }
+        mock_docs = MagicMock()
+        mock_docs.documents().batchUpdate().execute.return_value = {}
+
+        with patch.object(DriveBaseTool, "_get_drive_service", return_value=mock_drive), \
+             patch.object(DriveBaseTool, "_get_docs_service", return_value=mock_docs):
+            result = self._tool().execute(title="My Doc", content="Hello world")
+
+        assert "error" not in result
+        data = json.loads(result["result"])
+        assert data["status"] == "Document created"
+        assert data["title"] == "My Doc"
+        assert data["file_id"] == "new-file-123"
+        assert "docs.google.com" in data["url"]
+
+    def test_inserts_content_via_docs_api(self):
+        mock_drive = MagicMock()
+        mock_drive.files().create().execute.return_value = {
+            "id": "file-abc", "webViewLink": ""
+        }
+        mock_docs = MagicMock()
+        mock_docs.documents().batchUpdate().execute.return_value = {}
+
+        with patch.object(DriveBaseTool, "_get_drive_service", return_value=mock_drive), \
+             patch.object(DriveBaseTool, "_get_docs_service", return_value=mock_docs):
+            self._tool().execute(title="Doc", content="Some content")
+
+        call_kwargs = mock_docs.documents().batchUpdate.call_args.kwargs
+        requests = call_kwargs["body"]["requests"]
+        assert any("insertText" in r for r in requests)
+        inserted = next(r["insertText"]["text"] for r in requests if "insertText" in r)
+        assert inserted == "Some content"
+
+    def test_returns_error_on_api_failure(self):
+        mock_drive = MagicMock()
+        mock_drive.files().create().execute.side_effect = Exception("Create failed")
+
+        with patch.object(DriveBaseTool, "_get_drive_service", return_value=mock_drive):
+            result = self._tool().execute(title="Doc", content="Content")
+
+        assert "error" in result
+        assert "Create failed" in result["error"]
+
+    def test_description_name_is_correct(self):
+        assert self._tool().get_description()["name"] == "create_drive_doc"
+
+    def test_description_says_after_confirmation(self):
+        desc = self._tool().get_description()["description"]
+        assert "confirmed" in desc.lower() or "confirm" in desc.lower()

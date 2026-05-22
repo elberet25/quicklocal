@@ -206,3 +206,106 @@ class GetNotionPageTool(NotionBaseTool):
 
     def validate_input(self, **kwargs) -> bool:
         return bool(kwargs.get("page_id"))
+
+
+class CreateNotionPageTool(NotionBaseTool):
+    """Create a new Notion page, optionally nested under a parent page."""
+
+    name = "create_notion_page"
+
+    def get_description(self) -> dict:
+        return {
+            "name": self.name,
+            "description": (
+                "Creates a new Notion page with a title and text content. "
+                "If parent_page_id is provided, the page is created as a child of that page — "
+                "use the 'id' field from search_notion results. "
+                "If parent_page_id is omitted, creation at workspace root is attempted. "
+                "Always show the user what will be created and wait for confirmation before calling this tool."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the new Notion page.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Text content for the page body. Paragraphs separated by blank lines.",
+                    },
+                    "parent_page_id": {
+                        "type": "string",
+                        "description": (
+                            "ID of the parent Notion page (from search_notion results). "
+                            "If omitted, the page is created at workspace root."
+                        ),
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        }
+
+    def execute(self, **kwargs) -> dict:
+        try:
+            title = kwargs["title"]
+            content = kwargs["content"]
+            parent_page_id = kwargs.get("parent_page_id", "").strip()
+
+            client = self._get_client()
+
+            parent = (
+                {"type": "page_id", "page_id": parent_page_id}
+                if parent_page_id
+                else {"type": "workspace", "workspace": True}
+            )
+
+            page = client.pages.create(
+                parent=parent,
+                properties={
+                    "title": {
+                        "title": [{"type": "text", "text": {"content": title}}]
+                    }
+                },
+                children=self._text_to_blocks(content),
+            )
+
+            return {
+                "result": json.dumps({
+                    "status": "Page created",
+                    "title": title,
+                    "page_id": page["id"],
+                    "url": page.get("url", ""),
+                }, ensure_ascii=False, indent=2)
+            }
+        except APIResponseError as e:
+            # Workspace root creation often fails for integrations — give a helpful hint
+            if "parent" in str(e).lower() or "unauthorized" in str(e).lower():
+                return {
+                    "error": (
+                        f"Failed to create page: {e}. "
+                        "If no parent_page_id was provided, try passing one — "
+                        "most integrations cannot create workspace-root pages."
+                    )
+                }
+            return self.handle_error(e)
+        except Exception as e:
+            return self.handle_error(e)
+
+    def validate_input(self, **kwargs) -> bool:
+        return all(kwargs.get(f) for f in ("title", "content"))
+
+    @staticmethod
+    def _text_to_blocks(text: str) -> list[dict]:
+        """Convert plain text into Notion paragraph blocks (split on blank lines)."""
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        return [
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": p}}]
+                },
+            }
+            for p in paragraphs
+        ]

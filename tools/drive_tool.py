@@ -7,11 +7,15 @@ Shares credentials.json with Gmail/Calendar but uses a separate token file
 Supports:
   - Searching files by name/content query
   - Reading text content from Google Docs (native format)
+  - Creating new Google Docs (preview-then-create two-step pattern)
   - Other file types (PDF, DOCX, etc.) return a clear unsupported message
 
 Required files (not committed to git):
   credentials.json   — downloaded from Google Cloud Console (OAuth 2.0 Client ID)
   drive_token.json   — created automatically after first authorization
+
+NOTE: If scopes change (e.g. adding drive.file), delete drive_token.json to
+force re-authorization on next run.
 """
 
 import json
@@ -40,6 +44,7 @@ class DriveBaseTool(BaseTool):
     summarizable = True
     _SCOPES = [
         "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file",
     ]
     _CREDENTIALS_FILE = Path(os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json"))
     _TOKEN_FILE = Path(os.getenv("DRIVE_TOKEN_FILE", "drive_token.json"))
@@ -237,3 +242,117 @@ class ReadDriveDocumentTool(DriveBaseTool):
             if line.strip():
                 lines.append(line)
         return "\n".join(lines)
+
+
+class PreviewDriveDocTool(DriveBaseTool):
+    """Format a Google Doc for user review before creation — no API call."""
+
+    name = "preview_drive_doc"
+
+    def get_description(self) -> dict:
+        return {
+            "name": self.name,
+            "description": (
+                "Formats a new Google Doc and returns it for the user to review. "
+                "ALWAYS call this first and show the result to the user before calling create_drive_doc. "
+                "Never skip this step — the user must confirm before any document is created."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the Google Doc to create.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full text content of the document.",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        }
+
+    def execute(self, **kwargs) -> dict:
+        try:
+            preview = {
+                "status": "PREVIEW — not created yet",
+                "title": kwargs["title"],
+                "content": kwargs["content"],
+            }
+            return {"result": json.dumps(preview, ensure_ascii=False, indent=2)}
+        except Exception as e:
+            return self.handle_error(e)
+
+    def validate_input(self, **kwargs) -> bool:
+        return all(kwargs.get(f) for f in ("title", "content"))
+
+
+class CreateDriveDocTool(DriveBaseTool):
+    """Create a new Google Doc in Drive with the given title and content."""
+
+    name = "create_drive_doc"
+
+    def get_description(self) -> dict:
+        return {
+            "name": self.name,
+            "description": (
+                "Creates a new Google Doc in Drive. "
+                "Only call this after preview_drive_doc has been shown to the user "
+                "and they have explicitly confirmed (e.g. 'yes', 'create it', 'looks good')."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Title of the Google Doc.",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full text content of the document.",
+                    },
+                },
+                "required": ["title", "content"],
+            },
+        }
+
+    def execute(self, **kwargs) -> dict:
+        try:
+            title = kwargs["title"]
+            content = kwargs["content"]
+
+            drive_service = self._get_drive_service()
+
+            # Create an empty Google Doc
+            file_meta = {"name": title, "mimeType": GOOGLE_DOC_MIME}
+            created = drive_service.files().create(
+                body=file_meta,
+                fields="id, webViewLink",
+            ).execute()
+
+            file_id = created["id"]
+            url = created.get("webViewLink", "")
+
+            # Insert content via Docs API
+            docs_service = self._get_docs_service()
+            docs_service.documents().batchUpdate(
+                documentId=file_id,
+                body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]},
+            ).execute()
+
+            return {
+                "result": json.dumps({
+                    "status": "Document created",
+                    "title": title,
+                    "file_id": file_id,
+                    "url": url,
+                }, ensure_ascii=False, indent=2)
+            }
+        except HttpError as e:
+            return self.handle_error(e)
+        except Exception as e:
+            return self.handle_error(e)
+
+    def validate_input(self, **kwargs) -> bool:
+        return all(kwargs.get(f) for f in ("title", "content"))
