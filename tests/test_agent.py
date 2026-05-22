@@ -6,11 +6,15 @@ Run from the project root:
 """
 
 import re
+from unittest.mock import patch
 
 import pytest
 from tools.time_tool import TimeTool
 from tools.calculator_tool import CalculatorTool
-from src.agent import execute_tool
+from tools.calendar_tool import CreateEventTool
+from tools.drive_tool import CreateDriveDocTool
+from tools.notion_tool import CreateNotionPageTool
+from src.agent import execute_tool, tool_registry
 
 
 class TestTimeTool:
@@ -78,3 +82,63 @@ class TestExecuteTool:
         result = execute_tool("nonexistent_tool", {})
         assert "Error" in result
         assert "nonexistent_tool" in result
+
+
+class TestRequiresConfirmationAttributes:
+    """Verify requires_confirmation flag and message content on write tools."""
+
+    def test_create_event_requires_confirmation(self):
+        assert CreateEventTool.requires_confirmation is True
+
+    def test_create_drive_doc_requires_confirmation(self):
+        assert CreateDriveDocTool.requires_confirmation is True
+
+    def test_create_notion_page_requires_confirmation(self):
+        assert CreateNotionPageTool.requires_confirmation is True
+
+    def test_read_tools_do_not_require_confirmation(self):
+        assert TimeTool.requires_confirmation is False
+
+    def test_create_event_message_contains_summary_and_times(self):
+        msg = CreateEventTool().get_confirmation_message(
+            summary="Team Sync", start="2026-05-23T14:00:00", end="2026-05-23T15:00:00"
+        )
+        assert "Team Sync" in msg
+        assert "2026-05-23T14:00:00" in msg
+        assert "2026-05-23T15:00:00" in msg
+
+    def test_create_drive_doc_message_contains_title(self):
+        msg = CreateDriveDocTool().get_confirmation_message(title="Q4 Report", content="body")
+        assert "Q4 Report" in msg
+
+    def test_create_notion_page_message_contains_title(self):
+        msg = CreateNotionPageTool().get_confirmation_message(title="Sprint Notes", content="body")
+        assert "Sprint Notes" in msg
+
+
+class TestConfirmationGate:
+    """Verify execute_tool prompts and gates write actions correctly."""
+
+    _event_input = {"summary": "Test", "start": "2026-05-23T14:00:00", "end": "2026-05-23T15:00:00"}
+
+    def test_confirmed_executes_tool(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "y")
+        with patch.object(tool_registry["create_event"], "execute", return_value={"result": "event created"}):
+            result = execute_tool("create_event", self._event_input)
+        assert result == "event created"
+
+    def test_declined_cancels(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+        result = execute_tool("create_event", self._event_input)
+        assert result == "Action cancelled by user."
+
+    def test_empty_answer_cancels(self, monkeypatch):
+        monkeypatch.setattr("builtins.input", lambda _: "")
+        result = execute_tool("create_event", self._event_input)
+        assert result == "Action cancelled by user."
+
+    def test_read_tools_skip_prompt(self, monkeypatch):
+        prompted = []
+        monkeypatch.setattr("builtins.input", lambda _: prompted.append(True) or "y")
+        execute_tool("get_current_time", {})
+        assert prompted == []

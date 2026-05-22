@@ -292,6 +292,12 @@ class CreateDriveDocTool(DriveBaseTool):
     """Create a new Google Doc in Drive with the given title and content."""
 
     name = "create_drive_doc"
+    requires_confirmation = True
+
+    def get_confirmation_message(self, **kwargs) -> str:
+        """Show doc title before creating."""
+        title = kwargs.get("title", "(untitled)")
+        return f"Create Google Doc: '{title}'."
 
     def get_description(self) -> dict:
         return {

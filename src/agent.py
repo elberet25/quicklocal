@@ -318,6 +318,11 @@ def execute_tool(name: str, tool_input: dict) -> str:
     tool = tool_registry.get(name)
     if tool is None:
         return f"Error: unknown tool '{name}'"
+    if tool.requires_confirmation:
+        print(f"\n{tool.get_confirmation_message(**tool_input)}")
+        answer = input("Proceed? (y/n): ").strip().lower()
+        if answer != "y":
+            return "Action cancelled by user."
     result = tool.execute(**tool_input)
     return result.get("result", result.get("error", str(result)))
 

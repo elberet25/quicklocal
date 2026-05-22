@@ -240,6 +240,14 @@ class FindFreeTimeTool(CalendarBaseTool):
 
 class CreateEventTool(CalendarBaseTool):
     name = "create_event"
+    requires_confirmation = True
+
+    def get_confirmation_message(self, **kwargs) -> str:
+        """Show event details before creating."""
+        summary = kwargs.get("summary", "(untitled)")
+        start = kwargs.get("start", "?")
+        end = kwargs.get("end", "?")
+        return f"Create calendar event: '{summary}' from {start} to {end}."
 
     def get_description(self) -> dict:
         return {
