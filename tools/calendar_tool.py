@@ -238,15 +238,96 @@ class FindFreeTimeTool(CalendarBaseTool):
             return self.handle_error(e)
 
 
+class PreviewEventTool(CalendarBaseTool):
+    """Format a preview of a new calendar event without creating it."""
+
+    name = "preview_event"
+    summarizable = False
+    requires_confirmation = False
+
+    def get_description(self) -> dict:
+        return {
+            "name": self.name,
+            "description": (
+                "Format a preview of a new calendar event without creating it. "
+                "Always call this before create_event — show the preview to the user "
+                "and wait for explicit confirmation before creating."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "Event title.",
+                    },
+                    "start": {
+                        "type": "string",
+                        "description": "Start datetime in ISO 8601 format, e.g. '2024-01-15T14:00:00'.",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "End datetime in ISO 8601 format, e.g. '2024-01-15T15:00:00'.",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional event description or notes.",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional location string.",
+                    },
+                },
+                "required": ["summary", "start", "end"],
+            },
+        }
+
+    def validate_input(self, **kwargs) -> bool:
+        try:
+            datetime.fromisoformat(kwargs.get("start", ""))
+            datetime.fromisoformat(kwargs.get("end", ""))
+            return bool(kwargs.get("summary"))
+        except ValueError:
+            return False
+
+    def execute(self, **kwargs) -> dict:
+        summary = kwargs.get("summary", "(untitled)")
+        start = kwargs.get("start", "")
+        end = kwargs.get("end", "")
+        location = kwargs.get("location", "")
+        description = kwargs.get("description", "")
+
+        lines = [
+            "=== Event Preview ===",
+            f"Title:    {summary}",
+            f"Start:    {start}",
+            f"End:      {end}",
+        ]
+        if location:
+            lines.append(f"Location: {location}")
+        if description:
+            lines.append(f"Notes:    {description}")
+
+        return {"result": "\n".join(lines)}
+
+
 class CreateEventTool(CalendarBaseTool):
     name = "create_event"
+    requires_confirmation = True
+
+    def get_confirmation_message(self, **kwargs) -> str:
+        """Show event details before creating."""
+        summary = kwargs.get("summary", "(untitled)")
+        start = kwargs.get("start", "?")
+        end = kwargs.get("end", "?")
+        return f"Create calendar event: '{summary}' from {start} to {end}."
 
     def get_description(self) -> dict:
         return {
             "name": self.name,
             "description": (
                 "Creates a new event on the user's primary Google Calendar. "
-                "Use when the user asks to add, schedule, or book something on their calendar."
+                "Only call this after preview_event has been shown to the user "
+                "and they have explicitly confirmed."
             ),
             "input_schema": {
                 "type": "object",

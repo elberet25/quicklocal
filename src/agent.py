@@ -21,7 +21,9 @@ CONVERSATION MEMORY:
 import json
 import logging
 import os
+import random
 import sys
+import time
 from pathlib import Path
 
 import anthropic
@@ -55,7 +57,8 @@ You are QuickLocal, a personal AI work assistant. You help the user manage their
 
 ## Tool Guidance
 - For email tasks (reading, searching, drafting replies) → use gmail_* tools
-- For calendar tasks (schedule, free time, creating events) → use calendar_* tools
+- For calendar tasks (schedule, free time) → use get_schedule or find_free_time
+- For creating a calendar event → always call preview_event first, show the preview to the user, and only call create_event after explicit confirmation
 - For searching or indexing local documents → use rag_* tools
 - For Notion tasks (finding pages, reading content, creating pages) → use search_notion, get_notion_page, create_notion_page
 - For Google Drive tasks (finding files, reading Google Docs) → use search_drive, read_drive_document
@@ -86,6 +89,9 @@ HISTORY_FILE = Path(os.getenv("CONVERSATION_HISTORY_FILE", "conversation_history
 
 # How many recent exchanges (user+assistant pairs) to keep verbatim.
 MAX_VERBATIM_EXCHANGES = 10
+
+# Maximum attempts for a single tool call before giving up (1 original + 2 retries).
+MAX_TOOL_RETRIES = 3
 
 
 def _sanitize_history(conversation: list[dict]) -> list[dict]:
@@ -318,7 +324,24 @@ def execute_tool(name: str, tool_input: dict) -> str:
     tool = tool_registry.get(name)
     if tool is None:
         return f"Error: unknown tool '{name}'"
-    result = tool.execute(**tool_input)
+    if not tool.validate_input(**tool_input):
+        return f"Error: invalid input for '{name}' — required fields missing or incorrectly formatted."
+    if tool.requires_confirmation:
+        print(f"\n{tool.get_confirmation_message(**tool_input)}")
+        answer = input("Proceed? (y/n): ").strip().lower()
+        if answer != "y":
+            return "Action cancelled by user."
+    for attempt in range(MAX_TOOL_RETRIES):
+        result = tool.execute(**tool_input)
+        if result.get("retryable") and attempt < MAX_TOOL_RETRIES - 1:
+            delay = (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                "Tool %s failed (attempt %d/%d), retrying in %.1fs: %s",
+                name, attempt + 1, MAX_TOOL_RETRIES, delay, result.get("error"),
+            )
+            time.sleep(delay)
+            continue
+        break
     return result.get("result", result.get("error", str(result)))
 
 
@@ -352,7 +375,7 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
     while True:
         response = client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=4096,
             tools=TOOLS,
             system=SYSTEM_PROMPT,
             messages=conversation,
@@ -378,6 +401,15 @@ def run_agent_turn(conversation: list[dict]) -> tuple[str, anthropic.types.Usage
                     "content": result_text,
                 })
             conversation.append({"role": "user", "content": tool_results})
+        elif response.stop_reason == "max_tokens":
+            partial = next(
+                (block.text for block in response.content if block.type == "text"), ""
+            )
+            logger.warning("Response hit token limit; partial text length: %d chars", len(partial))
+            return (
+                partial + "\n\n*(Response truncated — token limit reached.)*" if partial
+                else "*(Response truncated before any text was generated.)*"
+            ), last_usage
         else:
             raise RuntimeError(f"Unexpected stop_reason: {response.stop_reason!r}")
 

@@ -5,6 +5,7 @@ class BaseTool(ABC):
     name: str
     category: str = "utility"
     summarizable: bool = False
+    requires_confirmation: bool = False
 
     @abstractmethod
     def get_description(self) -> dict:
@@ -20,6 +21,18 @@ class BaseTool(ABC):
         """Validate parameters before execution. Override to add checks."""
         return True
 
+    def get_confirmation_message(self, **kwargs) -> str:
+        """Return a human-readable summary of the action about to be taken.
+
+        Override on tools with requires_confirmation=True to show specific details.
+        """
+        return f"About to run '{self.name}' with: {kwargs}"
+
     def handle_error(self, error: Exception) -> dict:
-        """Return a consistent error dict."""
-        return {"error": str(error)}
+        """Return a consistent error dict with actionable message and retryable hint."""
+        try:
+            from tools.error_utils import classify_error
+        except ImportError:
+            from error_utils import classify_error  # type: ignore[no-redef]
+        classified = classify_error(error)
+        return {"error": classified["message"], "retryable": classified["retryable"]}

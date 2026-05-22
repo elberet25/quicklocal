@@ -212,6 +212,12 @@ class CreateNotionPageTool(NotionBaseTool):
     """Create a new Notion page, optionally nested under a parent page."""
 
     name = "create_notion_page"
+    requires_confirmation = True
+
+    def get_confirmation_message(self, **kwargs) -> str:
+        """Show page title before creating."""
+        title = kwargs.get("title", "(untitled)")
+        return f"Create Notion page: '{title}'."
 
     def get_description(self) -> dict:
         return {
