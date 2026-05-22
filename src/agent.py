@@ -21,7 +21,9 @@ CONVERSATION MEMORY:
 import json
 import logging
 import os
+import random
 import sys
+import time
 from pathlib import Path
 
 import anthropic
@@ -87,6 +89,9 @@ HISTORY_FILE = Path(os.getenv("CONVERSATION_HISTORY_FILE", "conversation_history
 
 # How many recent exchanges (user+assistant pairs) to keep verbatim.
 MAX_VERBATIM_EXCHANGES = 10
+
+# Maximum attempts for a single tool call before giving up (1 original + 2 retries).
+MAX_TOOL_RETRIES = 3
 
 
 def _sanitize_history(conversation: list[dict]) -> list[dict]:
@@ -324,7 +329,17 @@ def execute_tool(name: str, tool_input: dict) -> str:
         answer = input("Proceed? (y/n): ").strip().lower()
         if answer != "y":
             return "Action cancelled by user."
-    result = tool.execute(**tool_input)
+    for attempt in range(MAX_TOOL_RETRIES):
+        result = tool.execute(**tool_input)
+        if result.get("retryable") and attempt < MAX_TOOL_RETRIES - 1:
+            delay = (2 ** attempt) + random.uniform(0, 1)
+            logger.warning(
+                "Tool %s failed (attempt %d/%d), retrying in %.1fs: %s",
+                name, attempt + 1, MAX_TOOL_RETRIES, delay, result.get("error"),
+            )
+            time.sleep(delay)
+            continue
+        break
     return result.get("result", result.get("error", str(result)))
 
 

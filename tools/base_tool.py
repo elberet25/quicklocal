@@ -29,5 +29,10 @@ class BaseTool(ABC):
         return f"About to run '{self.name}' with: {kwargs}"
 
     def handle_error(self, error: Exception) -> dict:
-        """Return a consistent error dict."""
-        return {"error": str(error)}
+        """Return a consistent error dict with actionable message and retryable hint."""
+        try:
+            from tools.error_utils import classify_error
+        except ImportError:
+            from error_utils import classify_error  # type: ignore[no-redef]
+        classified = classify_error(error)
+        return {"error": classified["message"], "retryable": classified["retryable"]}
