@@ -27,7 +27,7 @@ The goal is to keep adding tools until the assistant covers the main places wher
 | Unified search across local files + Notion + Drive | Done |
 | Slack integration (read channels, search, draft messages) | Done |
 | Write actions with confirmation gate (preview + y/n confirm for Calendar, Drive, Notion) | Done |
-| Multimodal (screenshots, images) | Planned |
+| Multimodal: image analysis via Claude Vision + RAG over images (discoverable by content) | Done |
 
 ## Tech Stack
 
@@ -36,7 +36,7 @@ The goal is to keep adding tools until the assistant covers the main places wher
 - **Google APIs**: Gmail, Calendar, Drive + Docs (OAuth 2.0)
 - **Notion API**: `notion-client` library, integration token auth
 - **Slack API**: `slack-sdk`, bot token (channel history) + user token (search)
-- **Multimodal** — vision-language understanding for screenshots and documents (planned)
+- **Multimodal**: Claude Vision API (interactive image analysis) + RAG over images — Vision-generated descriptions indexed in ChromaDB so images are discoverable by semantic content, not just filename
 - **Memory**: rolling summarization — last 10 exchanges verbatim, older turns condensed by Claude
 
 ## Project Structure
@@ -54,6 +54,7 @@ quicklocal/
 │   ├── drive_tool.py         # Google Drive search/read/create
 │   ├── unified_search_tool.py # Search all sources at once
 │   ├── slack_tool.py         # Slack read/search/draft
+│   ├── vision_tool.py        # Image analysis via Claude Vision API
 │   ├── error_utils.py        # Error classification + retryable flag
 │   ├── time_tool.py          # Current time/date
 │   └── calculator_tool.py
@@ -109,7 +110,9 @@ For Notion, create an integration at notion.so/my-integrations, copy the token, 
 python scripts/index_docs.py
 ```
 
-Supports `.pdf`, `.txt`, and `.md` files. On first index (or after a chunking strategy change), the agent also generates a 3–5 sentence Claude summary per document stored alongside the chunks. Subsequent searches auto-sync only changed files.
+Supports `.pdf`, `.txt`, `.md`, and image files (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`). On first index (or after a chunking strategy change), the agent generates a 3–5 sentence Claude summary per document and a Vision-generated description per image — both stored alongside the text chunks so all content is discoverable by semantic search. Subsequent searches auto-sync only changed files.
+
+> **Note**: the first search after adding new images to your data directory will be slower — the agent calls the Vision API synchronously for each new image before returning results. Subsequent searches are fast (descriptions are cached in the index).
 
 To inspect retrieval at runtime:
 
@@ -145,6 +148,9 @@ You: Create a Notion page under my Meeting Notes with a summary of last week
 You: What's the latest in #general?
 You: Search Slack for messages about the recommender project
 You: Draft a message to #data-science saying the model review is confirmed for Friday
+You: /image ~/docs/architecture.png    ← analyze an image directly
+You: /image ~/screenshots/error.png what does this error mean?
+You: summarize everything I have about Project X, including any charts or diagrams.
 You: /clear    ← reset conversation
 ```
 

@@ -17,6 +17,8 @@ from tools.rag_tool import (
     IndexDocumentsTool,
     SearchDocumentsTool,
     _is_allowed,
+    RAGEngine,
+    CHUNKING_VERSION,
 )
 
 
@@ -155,3 +157,237 @@ class TestIndexDocumentsTool:
             result = self.tool.execute()
         assert "result" in result
         assert "no" in result["result"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Shared fixture: RAGEngine instance with mocked ChromaDB and embeddings
+# ---------------------------------------------------------------------------
+
+def _make_engine():
+    """Create a RAGEngine instance with mocked external dependencies."""
+    with patch("tools.rag_tool.chromadb.PersistentClient"), \
+         patch("tools.rag_tool.SentenceTransformer"):
+        RAGEngine._instance = None
+        eng = RAGEngine.get()
+    eng._collection = MagicMock()
+    eng._model = MagicMock()
+    # encode() returns a numpy-array-like: needs .tolist() to work in _index_image_file
+    mock_embedding = MagicMock()
+    mock_embedding.tolist.return_value = [[0.1, 0.2, 0.3]]
+    eng._model.encode.return_value = mock_embedding
+    return eng
+
+
+def _png(tmp_path, name="diagram.png"):
+    f = tmp_path / name
+    f.write_bytes(b"\x89PNG\r\n\x1a\n")
+    return f
+
+
+def _vision_response(text):
+    resp = MagicMock()
+    resp.content = [MagicMock(text=text)]
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# RAGEngine: _describe_image
+# ---------------------------------------------------------------------------
+
+class TestDescribeImage:
+    def setup_method(self):
+        self.engine = _make_engine()
+
+    def teardown_method(self):
+        RAGEngine._instance = None
+
+    def test_returns_description_on_success(self, tmp_path):
+        img = _png(tmp_path)
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _vision_response("A flowchart showing steps.")
+            result = self.engine._describe_image(img)
+        assert result == "A flowchart showing steps."
+
+    def test_exception_returns_empty_string(self, tmp_path):
+        img = _png(tmp_path)
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.side_effect = Exception("API error")
+            result = self.engine._describe_image(img)
+        assert result == ""
+
+    def test_empty_api_response_returns_empty_string(self, tmp_path):
+        """Vision API returns 200 but response text is empty — not an exception."""
+        img = _png(tmp_path)
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _vision_response("")
+            result = self.engine._describe_image(img)
+        assert result == ""
+
+    def test_whitespace_api_response_returns_empty_string(self, tmp_path):
+        """Vision API returns whitespace-only text — treated the same as empty."""
+        img = _png(tmp_path)
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_cls.return_value.messages.create.return_value = _vision_response("   \n  ")
+            result = self.engine._describe_image(img)
+        assert result == ""
+
+    def test_png_uses_correct_media_type(self, tmp_path):
+        img = _png(tmp_path)
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_client = mock_cls.return_value
+            mock_client.messages.create.return_value = _vision_response("desc")
+            self.engine._describe_image(img)
+        messages = mock_client.messages.create.call_args.kwargs["messages"]
+        image_block = next(b for b in messages[0]["content"] if b.get("type") == "image")
+        assert image_block["source"]["media_type"] == "image/png"
+
+    def test_jpg_uses_correct_media_type(self, tmp_path):
+        img = tmp_path / "photo.jpg"
+        img.write_bytes(b"\xff\xd8\xff")
+        with patch("tools.rag_tool.anthropic.Anthropic") as mock_cls:
+            mock_client = mock_cls.return_value
+            mock_client.messages.create.return_value = _vision_response("desc")
+            self.engine._describe_image(img)
+        messages = mock_client.messages.create.call_args.kwargs["messages"]
+        image_block = next(b for b in messages[0]["content"] if b.get("type") == "image")
+        assert image_block["source"]["media_type"] == "image/jpeg"
+
+
+# ---------------------------------------------------------------------------
+# RAGEngine: _index_image_file
+# ---------------------------------------------------------------------------
+
+class TestIndexImageFile:
+    def setup_method(self):
+        self.engine = _make_engine()
+
+    def teardown_method(self):
+        RAGEngine._instance = None
+
+    def test_success_returns_1(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value="A component diagram."):
+            result = self.engine._index_image_file(img)
+        assert result == 1
+
+    def test_collection_add_called_on_success(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value="A component diagram."):
+            self.engine._index_image_file(img)
+        self.engine._collection.add.assert_called_once()
+
+    def test_descriptor_text_contains_image_marker_path_and_description(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value="A flowchart."):
+            self.engine._index_image_file(img)
+        doc = self.engine._collection.add.call_args.kwargs["documents"][0]
+        assert doc.startswith("[IMAGE]")
+        assert img.name in doc
+        assert str(img) in doc
+        assert "A flowchart." in doc
+
+    def test_metadata_level_chunk_type_image_source_path(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value="A chart."):
+            self.engine._index_image_file(img)
+        meta = self.engine._collection.add.call_args.kwargs["metadatas"][0]
+        assert meta["level"] == "chunk"
+        assert meta["type"] == "image"
+        assert meta["source"] == str(img)
+
+    def test_old_entry_deleted_before_new_add(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value="desc"):
+            self.engine._index_image_file(img)
+        self.engine._collection.delete.assert_called_once_with(where={"source": str(img)})
+
+    def test_vision_exception_returns_0(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value=""):
+            result = self.engine._index_image_file(img)
+        assert result == 0
+
+    def test_empty_description_from_api_returns_0(self, tmp_path):
+        """Covers the case where Vision API returns 200 but an empty string — not an exception."""
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value=""):
+            result = self.engine._index_image_file(img)
+        assert result == 0
+
+    def test_vision_failure_does_not_call_collection_add(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_describe_image", return_value=""):
+            self.engine._index_image_file(img)
+        self.engine._collection.add.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# RAGEngine: _sync_directory with image files
+# ---------------------------------------------------------------------------
+
+class TestSyncDirectoryImages:
+    def setup_method(self):
+        self.engine = _make_engine()
+
+    def teardown_method(self):
+        RAGEngine._instance = None
+
+    def test_new_image_routed_to_index_image_file(self, tmp_path):
+        img = _png(tmp_path)
+        with patch.object(self.engine, "_load_manifest", return_value={"__chunking_version__": CHUNKING_VERSION}), \
+             patch.object(self.engine, "_save_manifest"), \
+             patch.object(self.engine, "_index_image_file", return_value=1) as mock_idx:
+            self.engine._sync_directory(tmp_path)
+        mock_idx.assert_called_once_with(img)
+
+    def test_manifest_updated_when_image_indexed_successfully(self, tmp_path):
+        img = _png(tmp_path)
+        mock_save = MagicMock()
+        with patch.object(self.engine, "_load_manifest", return_value={"__chunking_version__": CHUNKING_VERSION}), \
+             patch.object(self.engine, "_save_manifest", mock_save), \
+             patch.object(self.engine, "_index_image_file", return_value=1):
+            self.engine._sync_directory(tmp_path)
+        mock_save.assert_called_once()
+        saved_manifest = mock_save.call_args[0][0]
+        assert str(img) in saved_manifest
+
+    def test_manifest_not_updated_when_vision_fails(self, tmp_path):
+        """If _index_image_file returns 0, manifest is not written so the file retries next sync."""
+        _png(tmp_path)
+        mock_save = MagicMock()
+        with patch.object(self.engine, "_load_manifest", return_value={"__chunking_version__": CHUNKING_VERSION}), \
+             patch.object(self.engine, "_save_manifest", mock_save), \
+             patch.object(self.engine, "_index_image_file", return_value=0):
+            self.engine._sync_directory(tmp_path)
+        mock_save.assert_not_called()
+
+    def test_image_reindexed_when_mtime_changes(self, tmp_path):
+        img = _png(tmp_path)
+        stale_state = {"mtime": 0.0, "size": 0}
+        with patch.object(self.engine, "_load_manifest",
+                          return_value={"__chunking_version__": CHUNKING_VERSION, str(img): stale_state}), \
+             patch.object(self.engine, "_save_manifest"), \
+             patch.object(self.engine, "_index_image_file", return_value=1) as mock_idx:
+            self.engine._sync_directory(tmp_path)
+        mock_idx.assert_called_once_with(img)
+
+    def test_image_not_reindexed_when_unchanged(self, tmp_path):
+        img = _png(tmp_path)
+        current_state = self.engine._file_state(img)
+        with patch.object(self.engine, "_load_manifest",
+                          return_value={"__chunking_version__": CHUNKING_VERSION, str(img): current_state}), \
+             patch.object(self.engine, "_save_manifest"), \
+             patch.object(self.engine, "_index_image_file") as mock_idx:
+            self.engine._sync_directory(tmp_path)
+        mock_idx.assert_not_called()
+
+    def test_chunking_version_change_clears_old_entries_and_indexes_images(self, tmp_path):
+        img = _png(tmp_path)
+        old_manifest = {"__chunking_version__": CHUNKING_VERSION - 1, str(img): {"mtime": 0.0, "size": 0}}
+        with patch.object(self.engine, "_load_manifest", return_value=old_manifest), \
+             patch.object(self.engine, "_save_manifest"), \
+             patch.object(self.engine, "_index_image_file", return_value=1) as mock_idx:
+            self.engine._sync_directory(tmp_path)
+        # Old entry deleted due to version change, image treated as new and indexed
+        self.engine._collection.delete.assert_called()
+        mock_idx.assert_called_once_with(img)

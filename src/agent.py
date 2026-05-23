@@ -22,8 +22,10 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import anthropic
@@ -64,6 +66,8 @@ You are QuickLocal, a personal AI work assistant. You help the user manage their
 - For Google Drive tasks (finding files, reading Google Docs) → use search_drive, read_drive_document
 - For creating a Google Doc → always call preview_drive_doc first, show the preview to the user, and only call create_drive_doc after explicit confirmation
 - For Slack tasks (reading a channel, searching messages) → use get_channel_messages or search_slack; use get_slack_user_info to resolve any raw user ID you encounter into a display name
+- For analyzing images or screenshots → use analyze_image with the file path; supported formats: PNG, JPG, JPEG, GIF, WebP
+- When search results include an [IMAGE] entry, its Vision-generated description is already indexed — use it to answer general questions; only call analyze_image when deeper analysis of that specific image is needed to complete the task
 - For drafting a Slack message → always use draft_slack_message first and wait for explicit user confirmation before any further action
 - For broad searches across all knowledge sources at once → use search_all_knowledge
 - Always call preview_draft_reply before create_draft_reply — never skip the preview step
@@ -92,6 +96,8 @@ MAX_VERBATIM_EXCHANGES = 10
 
 # Maximum attempts for a single tool call before giving up (1 original + 2 retries).
 MAX_TOOL_RETRIES = 3
+
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 def _sanitize_history(conversation: list[dict]) -> list[dict]:
@@ -427,7 +433,7 @@ def main() -> None:
     else:
         print("AI Agent ready.  Type your message, or 'quit' to exit.\n")
 
-    print("Commands: /clear — reset conversation\n")
+    print("Commands: /clear — reset conversation | /image <path> [question] — analyze an image\n")
 
     while True:
         user_input = input("You: ").strip()
@@ -442,6 +448,71 @@ def main() -> None:
             conversation.clear()
             clear_history()
             print("Conversation cleared.\n")
+            continue
+
+        if user_input.lower().startswith("/image"):
+            rest = user_input[len("/image"):].strip()
+            # Match path (ending in a known image extension) then optional question.
+            # Using a regex allows paths that contain spaces.
+            match = re.match(
+                r"(.+?\.\w+)(?:\s+(.+))?$",
+                rest,
+                re.IGNORECASE,
+            )
+            if not match:
+                print("Usage: /image <path> [question]\n")
+                continue
+
+            raw_path = match.group(1)
+            question = match.group(2) or "Describe this image in detail."
+            image_path = str(Path(raw_path).expanduser().resolve())
+            path_obj = Path(image_path)
+
+            if not path_obj.exists():
+                print(f"File not found: {raw_path}\n")
+                continue
+            if path_obj.suffix.lower() not in _IMAGE_EXTENSIONS:
+                print(f"Unsupported file type '{path_obj.suffix}'. Supported: PNG, JPG, JPEG, GIF, WebP\n")
+                continue
+
+            vision_tool = tool_registry.get("analyze_image")
+            if vision_tool is None:
+                print("Error: analyze_image tool not registered.\n")
+                continue
+
+            print("Analyzing image...")
+            tool_result = vision_tool.execute(image_path=image_path, question=question)
+            if "error" in tool_result:
+                print(f"Error: {tool_result['error']}\n")
+                continue
+
+            analysis = tool_result["result"]
+            tool_use_id = str(uuid.uuid4())
+
+            conversation.append({"role": "user", "content": user_input})
+            conversation.append({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": tool_use_id, "name": "analyze_image",
+                              "input": {"image_path": image_path, "question": question}}],
+            })
+            conversation.append({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": analysis}],
+            })
+
+            answer, usage = run_agent_turn(conversation)
+            conversation.append({"role": "assistant", "content": answer})
+
+            try:
+                conversation = summarize_old_exchanges(conversation)
+            except Exception as e:
+                logger.warning("Summarization failed, continuing with full history: %s", e)
+
+            save_history(conversation)
+
+            total_tokens = usage.input_tokens + usage.output_tokens
+            print(f"\nClaude: {answer}")
+            print(f"[tokens: {total_tokens} ({usage.input_tokens} in / {usage.output_tokens} out)]\n")
             continue
 
         conversation.append({"role": "user", "content": user_input})

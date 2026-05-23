@@ -26,11 +26,12 @@ EMBED_MODEL = "all-MiniLM-L6-v2"
 MIN_CHUNK_CHARS = 50
 MIN_MERGE_CHARS = 150  # chunks shorter than this are merged into the following chunk
 SUPPORTED = {".pdf", ".txt", ".md"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 DOC_SUMMARY_MIN_CHARS = 300  # documents shorter than this skip the Claude call
 
-# Increment whenever the chunking strategy changes (triggers automatic full reindex)
-CHUNKING_VERSION = 4
+# Increment whenever the chunking strategy or indexed file types change (triggers automatic full reindex)
+CHUNKING_VERSION = 5
 
 
 def _is_allowed(path: Path) -> bool:
@@ -171,6 +172,52 @@ class RAGEngine:
             logger.warning("Could not summarize %s: %s", filename, e)
             return ""
 
+    def _describe_image(self, file: Path) -> str:
+        """Return a rich text description of an image via Claude Vision (Haiku).
+
+        Used at index time so images are discoverable via semantic search without
+        requiring a Vision API call on every query. Returns "" on any failure or
+        if the API returns an empty response — caller should skip indexing in that case.
+        """
+        import base64
+        try:
+            media_types = {
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+            }
+            media_type = media_types.get(file.suffix.lower(), "image/png")
+            image_data = base64.standard_b64encode(file.read_bytes()).decode("utf-8")
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=300,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {"type": "base64", "media_type": media_type, "data": image_data},
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "Describe this image in detail for the purpose of making it searchable. "
+                                "Cover what it shows, key concepts, any visible text, and the content "
+                                "type (diagram, chart, screenshot, photo, etc.)."
+                            ),
+                        },
+                    ],
+                }],
+            )
+            description = response.content[0].text.strip()
+            if not description:
+                logger.warning("Vision API returned empty description for %s", file.name)
+                return ""
+            return description
+        except Exception as e:
+            logger.warning("Could not describe image %s: %s", file.name, e)
+            return ""
+
     # ------------------------------------------------------------------
     # Core indexing (single file)
     # ------------------------------------------------------------------
@@ -207,6 +254,29 @@ class RAGEngine:
 
         return len(chunks)
 
+    def _index_image_file(self, file: Path) -> int:
+        """Describe and index a single image file. Returns 1 on success, 0 on failure.
+
+        A return value of 0 means the manifest should NOT be updated so the file
+        is retried on the next sync (unlike empty text files, a Vision API failure
+        is transient and worth retrying).
+        """
+        self._collection.delete(where={"source": str(file)})
+        description = self._describe_image(file)
+        if not description:
+            return 0
+
+        doc = f"[IMAGE] {file.name}\nPath: {file}\nDescription: {description}"
+        doc_id = hashlib.md5(f"{file}::image".encode()).hexdigest()
+        embedding = self._model.encode([doc], show_progress_bar=False).tolist()
+        self._collection.add(
+            ids=[doc_id],
+            documents=[doc],
+            metadatas=[{"source": str(file), "level": "chunk", "type": "image"}],
+            embeddings=embedding,
+        )
+        return 1
+
     # ------------------------------------------------------------------
     # Auto-sync (called lazily on search)
     # ------------------------------------------------------------------
@@ -235,7 +305,7 @@ class RAGEngine:
         current_files = {
             f: self._file_state(f)
             for f in directory.rglob("*")
-            if f.suffix.lower() in SUPPORTED
+            if f.suffix.lower() in SUPPORTED or f.suffix.lower() in IMAGE_EXTENSIONS
         }
 
         changed = False
@@ -243,9 +313,15 @@ class RAGEngine:
         for file, state in current_files.items():
             if manifest.get(str(file)) != state:
                 logger.debug("Auto-indexing changed file: %s", file.name)
-                self._index_file(file)
-                manifest[str(file)] = state
-                changed = True
+                if file.suffix.lower() in IMAGE_EXTENSIONS:
+                    n = self._index_image_file(file)
+                    if n > 0:
+                        manifest[str(file)] = state
+                        changed = True
+                else:
+                    self._index_file(file)
+                    manifest[str(file)] = state
+                    changed = True
 
         for key in list(manifest.keys()):
             if key.startswith("__"):
@@ -266,14 +342,20 @@ class RAGEngine:
 
     def index_directory(self, directory: Path) -> tuple[int, list[str]]:
         """Force-index all supported files in directory. Updates manifest."""
-        files = [f for f in directory.rglob("*") if f.suffix.lower() in SUPPORTED]
+        files = [
+            f for f in directory.rglob("*")
+            if f.suffix.lower() in SUPPORTED or f.suffix.lower() in IMAGE_EXTENSIONS
+        ]
         manifest = self._load_manifest()
 
         total_chunks = 0
         indexed_files = []
 
         for file in files:
-            n = self._index_file(file)
+            if file.suffix.lower() in IMAGE_EXTENSIONS:
+                n = self._index_image_file(file)
+            else:
+                n = self._index_file(file)
             if n > 0:
                 manifest[str(file)] = self._file_state(file)
                 total_chunks += n
@@ -361,7 +443,9 @@ class IndexDocumentsTool(BaseTool):
         return {
             "name": self.name,
             "description": (
-                "Index local documents (PDF, TXT, MD) into the RAG vector store. "
+                "Index local documents (PDF, TXT, MD) and images (PNG, JPG, JPEG, GIF, WebP) "
+                "into the RAG vector store. Images are described via Claude Vision at index time "
+                "so they are searchable by content. "
                 f"Allowed directories: {allowed}. Any other path will be rejected. "
                 "Omit directory to index all configured directories."
             ),
@@ -400,7 +484,7 @@ class IndexDocumentsTool(BaseTool):
                 all_files.extend(files)
 
             if not all_files:
-                return {"result": "No PDF/TXT/MD files found in configured directories."}
+                return {"result": "No PDF/TXT/MD/image files found in configured directories."}
             return {
                 "result": (
                     f"Indexed {len(all_files)} file(s), {total_chunks} chunk(s) total.\n"
@@ -425,7 +509,12 @@ class SearchDocumentsTool(BaseTool):
             "name": self.name,
             "description": (
                 "Search indexed local documents using semantic similarity. "
-                "Returns the most relevant text chunks from files in the RAG store. "
+                "Returns the most relevant text chunks from PDF, TXT, and MD files, "
+                "plus any indexed images (marked [IMAGE] in results). "
+                "Image results include a Vision-generated description and the full file path. "
+                "Use the indexed description to answer general questions about an image; "
+                "call analyze_image with the path only when you need deeper analysis "
+                "beyond what the description already covers. "
                 "Use this to answer questions about the user's documents."
             ),
             "input_schema": {

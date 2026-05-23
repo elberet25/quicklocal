@@ -17,6 +17,7 @@ from tools.notion_tool import SearchNotionTool, GetNotionPageTool, CreateNotionP
 from tools.drive_tool import SearchDriveTool, ReadDriveDocumentTool, PreviewDriveDocTool, CreateDriveDocTool
 from tools.unified_search_tool import UnifiedSearchTool
 from tools.slack_tool import GetChannelMessagesTool, SearchSlackTool, GetSlackUserInfoTool, DraftSlackMessageTool
+from tools.vision_tool import AnalyzeImageTool
 
 ALL_TOOLS = [
     TimeTool(),
@@ -43,6 +44,7 @@ ALL_TOOLS = [
     SearchSlackTool(),
     GetSlackUserInfoTool(),
     DraftSlackMessageTool(),
+    AnalyzeImageTool(),
 ]
 
 __all__ = ["ALL_TOOLS"]
